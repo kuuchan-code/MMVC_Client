@@ -4,8 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tract-onnx = "0.21.6"
-hound = "3.4.0"
-realfft = "3.3.0"
-ndarray = "0.15.6"
-smallvec = "1.13.2"
+ort = "1.16.3"
+ndarray = "0.15"
