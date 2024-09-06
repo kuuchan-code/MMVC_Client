@@ -1,15 +1,12 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tract_onnx::prelude::*;
 use tract_ndarray::Array1;
+use realfft::RealFftPlanner;
 
 fn main() -> TractResult<()> {
     // ONNXモデルを読み込み
     let model_path = r"C:\Users\ku-chan\mmvc_client\logs\runa\G_best.onnx";
     let model = load_onnx_model(model_path)?;
-
-    // モデルの入力情報を表示
-    print_model_input_info(&model);
-    // print_model_nodes_info(&model);
 
     let host = cpal::default_host();
     let input_device = host.default_input_device().expect("入力デバイスが見つかりません");
@@ -25,10 +22,13 @@ fn main() -> TractResult<()> {
         &config.into(),
         move |data: &[f32], _: &cpal::InputCallbackInfo| {
             // ONNXモデルを介して音声を処理
-            let result = run_voice_conversion(&model, data.to_vec()).unwrap();
+            let n_fft = 1024;
+            let hop_size = 256;
+            let win_size = 1024;
+            let _result = run_voice_conversion(&model, data.to_vec(), n_fft, hop_size, win_size).unwrap();
     
             // 変換された音声を出力デバイスに再生
-            output_audio(result.into_tensor().as_slice::<f32>().unwrap().to_vec(), &config_clone.config());
+            output_audio(data.to_vec(), &config_clone.config());
         },
         err_fn,
         None,  // Option<Duration> の引数を追加
@@ -50,14 +50,49 @@ fn load_onnx_model(model_path: &str) -> TractResult<TypedRunnableModel<TypedMode
     Ok(model)
 }
 
-fn run_voice_conversion(model: &TypedRunnableModel<TypedModel>, input_data: Vec<f32>) -> TractResult<Array1<f32>> {
-    let input_tensor = Array1::from(input_data).into_tensor();
-    let result = model.run(tvec![input_tensor.into()])?;
+fn calculate_spectrogram(y: &[f32], n_fft: usize, hop_size: usize, win_size: usize) -> Vec<Array1<f32>> {
+    let mut planner = RealFftPlanner::<f32>::new();
+    let r2c = planner.plan_fft_forward(n_fft);
+
+    let hann_window: Vec<f32> = (0..win_size)
+        .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / win_size as f32).cos()))
+        .collect();
+
+    let padded: Vec<f32> = vec![0.0; (n_fft - hop_size) / 2]
+        .into_iter()
+        .chain(y.iter().cloned())
+        .chain(vec![0.0; (n_fft - hop_size) / 2])
+        .collect();
+
+    let mut spectrum = vec![];
+    for chunk in padded.chunks(hop_size) {
+        let mut input: Vec<f32> = chunk.iter().zip(&hann_window).map(|(&s, &w)| s * w).collect();
+        input.resize(n_fft, 0.0);
+        let mut output = r2c.make_output_vec();
+        r2c.process(&mut input, &mut output).unwrap();
+
+        let power_spectrum: Array1<f32> = Array1::from(output.iter().map(|c| c.norm_sqr().sqrt()).collect::<Vec<_>>());
+        spectrum.push(power_spectrum);
+    }
+    spectrum
+}
+
+fn run_voice_conversion(model: &TypedRunnableModel<TypedModel>, input_data: Vec<f32>, n_fft: usize, hop_size: usize, win_size: usize) -> TractResult<()> {
+    let _spectrogram = calculate_spectrogram(&input_data, n_fft, hop_size, win_size);
     
-    // 出力を1次元配列に変換
-    let output = result[0].to_array_view::<f32>()?.into_shape(result[0].len())?.to_owned();
-    
-    Ok(output)
+    let input_tensor = Array1::from(input_data).into_tensor(); 
+    let n_fft_tensor = Tensor::from(n_fft as i64);
+    let hop_size_tensor = Tensor::from(hop_size as i64);
+    let win_size_tensor = Tensor::from(win_size as i64);
+
+    let _result = model.run(tvec![
+        input_tensor.into(),
+        n_fft_tensor.into(),
+        hop_size_tensor.into(),
+        win_size_tensor.into(),
+    ])?;
+
+    Ok(())
 }
 
 fn output_audio(data: Vec<f32>, config: &cpal::StreamConfig) {
@@ -78,20 +113,4 @@ fn output_audio(data: Vec<f32>, config: &cpal::StreamConfig) {
     ).unwrap();
 
     stream.play().unwrap();
-}
-
-fn print_model_input_info(model: &TypedRunnableModel<TypedModel>) {
-    // モデルの入力を取得
-    for (i, input) in model.model().inputs.iter().enumerate() {
-        let node_id = input.node;
-        let fact = model.model().node(node_id).outputs[0].fact.clone();
-        println!("入力 {}: {:?}", i, fact);
-    }
-}
-
-fn print_model_nodes_info(model: &TypedRunnableModel<TypedModel>) {
-    // モデルのノードを取得
-    for node in model.model().nodes() {
-        println!("{:?}", node);
-    }
 }
