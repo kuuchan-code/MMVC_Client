@@ -6,11 +6,14 @@ fn main() -> TractResult<()> {
     // ONNXモデルを読み込み
     let model_path = r"C:\Users\ku-chan\mmvc_client\logs\runa\G_best.onnx";
     let model = load_onnx_model(model_path)?;
-    // モデルの期待する入力を確認
+
+    // モデルの入力情報を表示
     print_model_input_info(&model);
+    // print_model_nodes_info(&model);
+
     let host = cpal::default_host();
     let input_device = host.default_input_device().expect("入力デバイスが見つかりません");
-    let output_device = host.default_output_device().expect("出力デバイスが見つかりません");
+    let _output_device = host.default_output_device().expect("出力デバイスが見つかりません");
 
     let config = input_device.default_input_config().unwrap();
     let config_clone = config.clone();  // クローンを作成
@@ -37,11 +40,6 @@ fn main() -> TractResult<()> {
     std::thread::sleep(std::time::Duration::from_secs(10));
 
     Ok(())
-}
-fn print_model_input_info(model: &TypedRunnableModel<TypedModel>) {
-    for input in model.input_outlets().unwrap() {
-        println!("{:?}", model.node(input.node).name);
-    }
 }
 
 fn load_onnx_model(model_path: &str) -> TractResult<TypedRunnableModel<TypedModel>> {
@@ -80,4 +78,20 @@ fn output_audio(data: Vec<f32>, config: &cpal::StreamConfig) {
     ).unwrap();
 
     stream.play().unwrap();
+}
+
+fn print_model_input_info(model: &TypedRunnableModel<TypedModel>) {
+    // モデルの入力を取得
+    for (i, input) in model.model().inputs.iter().enumerate() {
+        let node_id = input.node;
+        let fact = model.model().node(node_id).outputs[0].fact.clone();
+        println!("入力 {}: {:?}", i, fact);
+    }
+}
+
+fn print_model_nodes_info(model: &TypedRunnableModel<TypedModel>) {
+    // モデルのノードを取得
+    for node in model.model().nodes() {
+        println!("{:?}", node);
+    }
 }
