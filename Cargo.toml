@@ -7,3 +7,6 @@ edition = "2021"
 tract-onnx = "0.21.6"  # 最新バージョンを確認してください
 cpal = "0.15.3"
 rubato = "0.15.0"
+rustfft = "6.2.0"
+smallvec = "1.13.2"
+num-traits = "0.2.19"
