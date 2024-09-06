@@ -88,21 +88,22 @@ fn run_voice_conversion(
 ) -> TractResult<Vec<f32>> {
     let num_frames = input_data.len() / 257;
 
-    // フレーム数が少ない場合はゼロパディングを追加する
-    if num_frames < 2 {
-        let padding_frames = vec![0.0; 257 * (2 - num_frames)];
-        input_data.extend(padding_frames);
+    // フレーム数が少ない場合はゼロパディングを追加して調整
+    let total_frames = if num_frames < 2 { 2 } else { num_frames };
+    let padding_frames = 257 * total_frames - input_data.len();
+    if padding_frames > 0 {
+        input_data.extend(vec![0.0; padding_frames]);
     }
 
-    // テンソルに変換
-    let input_tensor = Tensor::from_shape(&[1, 257, input_data.len() / 257], &input_data)?;
+    // 入力データを (1, 257, total_frames) に整形してテンソルに変換
+    let input_tensor = Tensor::from_shape(&[1, 257, total_frames], &input_data)?;
 
     // スカラ値をテンソルに変換
-    let n_fft_tensor = Tensor::from(n_fft as i64);       // ここを修正
-    let hop_size_tensor = Tensor::from(hop_size as i64); // ここを修正
-    let win_size_tensor = Tensor::from(win_size as i64); // ここを修正
+    let n_fft_tensor = Tensor::from(n_fft as i64);
+    let hop_size_tensor = Tensor::from(hop_size as i64);
+    let win_size_tensor = Tensor::from(win_size as i64);
 
-    // モデルを実行 (4つの入力に変更)
+    // モデルを実行
     let result = model.run(tvec![
         input_tensor.into(),
         n_fft_tensor.into(),
@@ -119,3 +120,4 @@ fn run_voice_conversion(
 
     Ok(output)
 }
+
