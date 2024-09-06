@@ -56,11 +56,17 @@ impl AudioTransformer {
             .with_model_from_file("G_best.onnx")
             .unwrap();
     
-        // 入力データを3次元に変換
-        let input_array = Array::from_shape_vec((1, 1, signal.len()), signal.to_vec()).unwrap();
+        // 入力データを 257 にリサイズする（ゼロパディングを使用）
+        let mut padded_signal = vec![0.0; 257];
+        for (i, &s) in signal.iter().enumerate().take(257) {
+            padded_signal[i] = s;
+        }
+    
+        // 入力データを3次元に変換（[バッチ, 257, データ長] の形）
+        let input_array = Array::from_shape_vec((1, 257, padded_signal.len()), padded_signal).unwrap();
         let cow_array = CowArray::from(input_array.view());
         let allocator_ptr = std::ptr::null_mut(); // 既存のアロケータがない場合はnullポインタを使用
-        let binding = cow_array.into_dyn(); // cow_array から into_dyn() を一時的ではなく保持
+        let binding = cow_array.into_dyn();
         let input_tensor = Value::from_array(allocator_ptr, &binding).expect("Failed to create input tensor");
     
         // ONNXモデルで推論を実行
@@ -72,6 +78,7 @@ impl AudioTransformer {
     
         audio
     }
+    
     
 }
 
