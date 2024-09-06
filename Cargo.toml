@@ -1,0 +1,8 @@
+[package]
+name = "mmvc_client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tract-onnx = "0.21.6"  # 最新バージョンを確認してください
+cpal = "0.15.3"
