@@ -56,11 +56,14 @@ fn string_to_ids(text: &str) -> Vec<i64> {
 }
 
 // ONNXモデルの入力データ準備
-fn prepare_model_input(text: Vec<i64>, spec: Vec<f32>, wav: Vec<f32>, sid: i64) -> TractResult<TVec<TValue>> {
-    // スペクトログラムの長さが257で割り切れるか確認
-    let num_frames = spec.len() / 257;
-    if spec.len() % 257 != 0 {
-        panic!("スペクトログラムのデータ長が257で割り切れません。データ長: {}", spec.len());
+fn prepare_model_input(text: Vec<i64>, mut spec: Vec<f32>, wav: Vec<f32>, sid: i64) -> TractResult<TVec<TValue>> {
+    // フレーム数を計算し、257で割り切れない場合はゼロパディングを追加
+    let num_frames = (spec.len() + 256) / 257;  // フレーム数を切り上げ
+    let padding_size = 257 * num_frames - spec.len();  // 必要なパディングサイズ
+
+    // パディングが必要ならゼロを追加
+    if padding_size > 0 {
+        spec.extend(vec![0.0; padding_size]);
     }
 
     // テンソルに変換
@@ -79,6 +82,7 @@ fn prepare_model_input(text: Vec<i64>, spec: Vec<f32>, wav: Vec<f32>, sid: i64) 
 
     Ok(model_inputs)
 }
+
 
 
 // ONNXモデルの実行
