@@ -50,10 +50,10 @@ fn main() -> TractResult<()> {
             let n_fft = 1024;
             let hop_size = 256;
             let win_size = 1024;
-            let _result = run_voice_conversion(&model, data_resampled, n_fft, hop_size, win_size, target_sample_rate).unwrap();
+            let result = run_voice_conversion(&model, data_resampled, n_fft, hop_size, win_size, target_sample_rate).unwrap();
     
             // 変換された音声を出力デバイスに再生
-            output_audio(data.to_vec(), &config_clone.config());
+            output_audio(result, &config_clone.config());
         },
         err_fn,
         None,  // Option<Duration> の引数を追加
@@ -101,7 +101,8 @@ fn calculate_spectrogram(y: &[f32], n_fft: usize, hop_size: usize, win_size: usi
     spectrum
 }
 
-fn run_voice_conversion(model: &TypedRunnableModel<TypedModel>, input_data: Vec<f32>, n_fft: usize, hop_size: usize, win_size: usize, sample_rate: usize) -> TractResult<()> {
+fn run_voice_conversion(model: &TypedRunnableModel<TypedModel>, input_data: Vec<f32>, n_fft: usize, hop_size: usize, win_size: usize, sample_rate: usize) -> TractResult<Vec<f32>> {
+    // スペクトログラムを計算 (必要に応じて処理する)
     let _spectrogram = calculate_spectrogram(&input_data, n_fft, hop_size, win_size);
     
     let input_tensor = Array1::from(input_data).into_tensor(); 
@@ -110,7 +111,7 @@ fn run_voice_conversion(model: &TypedRunnableModel<TypedModel>, input_data: Vec<
     let win_size_tensor = Tensor::from(win_size as i64);
     let sample_rate_tensor = Tensor::from(sample_rate as i64);  // サンプリングレートを追加
 
-    let _result = model.run(tvec![
+    let result = model.run(tvec![
         input_tensor.into(),
         n_fft_tensor.into(),
         hop_size_tensor.into(),
@@ -118,8 +119,16 @@ fn run_voice_conversion(model: &TypedRunnableModel<TypedModel>, input_data: Vec<
         sample_rate_tensor.into(),  // モデルにサンプリングレートを渡す
     ])?;
 
-    Ok(())
+    // 配列を Vec<f32> に変換
+    let output: Vec<f32> = result[0]
+        .to_array_view::<f32>()?
+        .iter()
+        .cloned()
+        .collect();
+
+    Ok(output)
 }
+
 
 fn output_audio(data: Vec<f32>, config: &cpal::StreamConfig) {
     let host = cpal::default_host();
