@@ -1,5 +1,7 @@
 use ort::{Environment, SessionBuilder, Value, GraphOptimizationLevel};
-use ndarray::{Array, Array2, Array3, IxDyn, CowArray}; // Array2, Array3をインポート
+use ndarray::{Array, Array2, Array3, IxDyn, CowArray}; // IxDyn, CowArrayを追加
+use rustfft::{FftPlanner, num_complex::Complex};
+use std::f32::consts::PI;
 use std::sync::Arc;
 use hound; // WAVファイル処理用
 
@@ -7,12 +9,10 @@ use hound; // WAVファイル処理用
 struct Hyperparameters {
     sample_rate: u32,
     max_wav_value: f32,
+    filter_length: usize,  // FFTのウィンドウサイズ
     hop_length: usize,
-    dispose_stft_specs: usize,
-    dispose_conv1d_specs: usize,
-    overlap: usize,
-    target_id: i64,
-    channels: usize, // 3次元入力のためにチャネルを追加
+    channels: usize, // 257
+    target_id: i64,  // target_id フィールドを追加
 }
 
 impl Hyperparameters {
@@ -20,12 +20,10 @@ impl Hyperparameters {
         Hyperparameters {
             sample_rate: 24000,
             max_wav_value: 32768.0,
+            filter_length: 512,  // Pythonコードに基づく
             hop_length: 128,
-            dispose_stft_specs: 2,
-            dispose_conv1d_specs: 2,
-            overlap: 64,
-            target_id: 2,
-            channels: 257, // チャネル数を257に設定（モデルが期待するチャネル数に合わせる）
+            channels: 257, // モデルのチャネル数（257）
+            target_id: 2,  // 任意の話者ID
         }
     }
 }
@@ -40,6 +38,41 @@ fn load_wav(path: &str) -> Vec<f32> {
         .collect()
 }
 
+// 音声信号にパディングを追加
+fn pad_signal(signal: &mut Vec<f32>, filter_length: usize, hop_length: usize) {
+    let pad_size = (filter_length - hop_length) / 2;
+    let mut padded_signal = vec![0.0; pad_size];
+    padded_signal.extend(signal.iter());
+    padded_signal.extend(vec![0.0; pad_size]);
+    *signal = padded_signal;
+}
+
+// STFTを実行
+fn stft(signal: &Vec<f32>, hparams: &Hyperparameters) -> Array3<f32> {
+    let fft_size = hparams.filter_length;
+    let hop_size = hparams.hop_length;
+    let mut planner = FftPlanner::<f32>::new();
+    let fft = planner.plan_fft_forward(fft_size);
+
+    let num_frames = (signal.len() - fft_size) / hop_size + 1;
+    let mut spectrogram = Array3::<f32>::zeros((1, hparams.channels, num_frames));
+
+    let window: Vec<f32> = (0..fft_size).map(|n| 0.5 * (1.0 - (2.0 * PI * n as f32 / fft_size as f32).cos())).collect();
+
+    for (i, frame) in signal.windows(fft_size).step_by(hop_size).enumerate() {
+        let mut buffer: Vec<Complex<f32>> = frame.iter().zip(&window).map(|(x, w)| Complex::new(x * w, 0.0)).collect();
+        fft.process(&mut buffer);
+
+        // パワースペクトログラムを計算
+        for (j, bin) in buffer.iter().take(hparams.channels).enumerate() {
+            let power = (bin.re.powi(2) + bin.im.powi(2)).sqrt();
+            spectrogram[[0, j, i]] = power;
+        }
+    }
+
+    spectrogram
+}
+
 // ONNXモデルを推論する関数
 fn run_onnx_model(
     session: &ort::Session,
@@ -48,7 +81,6 @@ fn run_onnx_model(
     sid_src: &Array2<i64>, // 2次元配列
     sid_target: i64,
 ) -> Vec<f32> {
-    // 各CowArrayを事前に変数として保持する
     let spec_cow = CowArray::from(spec.clone().into_dyn());
     let spec_lengths_cow = CowArray::from(spec_lengths.clone().into_dyn());
     let sid_src_cow = CowArray::from(sid_src.clone().into_dyn());
@@ -64,7 +96,6 @@ fn run_onnx_model(
     let outputs: Vec<Value> = session.run(inputs).unwrap();
     let audio_output: ort::tensor::OrtOwnedTensor<f32, _> = outputs[0].try_extract().unwrap();
 
-    // OrtOwnedTensor を ndarray の Array に変換し、それを Vec に変換
     audio_output.view().to_owned().into_raw_vec()
 }
 
@@ -75,9 +106,13 @@ fn audio_trans(
     signal: Vec<f32>,
     target_id: i64,
 ) -> Vec<f32> {
-    let signal_len = signal.len();
-    let signal = Array::from_shape_vec((1, hparams.channels, signal_len / hparams.channels), signal).unwrap(); // 3次元配列に変換
-    let spec = signal.mapv(|x| x / hparams.max_wav_value); // 正規化
+    let mut padded_signal = signal.clone();
+    pad_signal(&mut padded_signal, hparams.filter_length, hparams.hop_length);
+
+    // STFTを実行してスペクトログラムを得る
+    let spec = stft(&padded_signal, hparams);
+
+    println!("spec shape: {:?}", spec.shape()); // 形状を確認
 
     // ダミーの長さ（サンプルの長さ）
     let spec_lengths = Array::from_elem((1, 1), spec.shape()[2] as i64); // 3次元目の長さ（時間ステップ）
