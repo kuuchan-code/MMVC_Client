@@ -22,7 +22,7 @@ fn main() -> TractResult<()> {
 
     // リサンプラーの設定
     let mut resampler = if input_sample_rate != target_sample_rate {
-        Some(FftFixedInOut::<f32>::new(input_sample_rate, target_sample_rate, 1024, 2).unwrap())
+        Some(FftFixedInOut::<f32>::new(input_sample_rate, target_sample_rate, 1024, 1).unwrap())  // 1チャンネルに設定
     } else {
         None
     };
