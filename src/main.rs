@@ -1,6 +1,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use tract_onnx::prelude::*;
 use tract_ndarray::Array1;
+use rubato::{FftFixedInOut, Resampler};
 use realfft::RealFftPlanner;
 
 fn main() -> TractResult<()> {
@@ -13,19 +14,35 @@ fn main() -> TractResult<()> {
     let _output_device = host.default_output_device().expect("出力デバイスが見つかりません");
 
     let config = input_device.default_input_config().unwrap();
+    let input_sample_rate = config.sample_rate().0 as usize;  // デバイスのサンプリングレートを取得
+    let target_sample_rate = 24000;  // モデルが期待するサンプリングレート
     let config_clone = config.clone();  // クローンを作成
     
     let err_fn = |err| eprintln!("エラーが発生しました: {}", err);
+
+    // リサンプラーの設定
+    let mut resampler = if input_sample_rate != target_sample_rate {
+        Some(FftFixedInOut::<f32>::new(input_sample_rate, target_sample_rate, 1024, 2).unwrap())
+    } else {
+        None
+    };
 
     // 入力ストリームを設定
     let stream = input_device.build_input_stream(
         &config.into(),
         move |data: &[f32], _: &cpal::InputCallbackInfo| {
+            // 入力データをリサンプリング
+            let data_resampled = if let Some(ref mut resampler) = resampler {
+                resampler.process(&[data.to_vec()], None).unwrap()[0].clone()  // リサンプリング処理
+            } else {
+                data.to_vec()
+            };
+    
             // ONNXモデルを介して音声を処理
             let n_fft = 1024;
             let hop_size = 256;
             let win_size = 1024;
-            let _result = run_voice_conversion(&model, data.to_vec(), n_fft, hop_size, win_size).unwrap();
+            let _result = run_voice_conversion(&model, data_resampled, n_fft, hop_size, win_size, target_sample_rate).unwrap();
     
             // 変換された音声を出力デバイスに再生
             output_audio(data.to_vec(), &config_clone.config());
@@ -34,7 +51,6 @@ fn main() -> TractResult<()> {
         None,  // Option<Duration> の引数を追加
     ).unwrap();
     
-
     stream.play().unwrap();
 
     std::thread::sleep(std::time::Duration::from_secs(10));
@@ -77,19 +93,21 @@ fn calculate_spectrogram(y: &[f32], n_fft: usize, hop_size: usize, win_size: usi
     spectrum
 }
 
-fn run_voice_conversion(model: &TypedRunnableModel<TypedModel>, input_data: Vec<f32>, n_fft: usize, hop_size: usize, win_size: usize) -> TractResult<()> {
+fn run_voice_conversion(model: &TypedRunnableModel<TypedModel>, input_data: Vec<f32>, n_fft: usize, hop_size: usize, win_size: usize, sample_rate: usize) -> TractResult<()> {
     let _spectrogram = calculate_spectrogram(&input_data, n_fft, hop_size, win_size);
     
     let input_tensor = Array1::from(input_data).into_tensor(); 
     let n_fft_tensor = Tensor::from(n_fft as i64);
     let hop_size_tensor = Tensor::from(hop_size as i64);
     let win_size_tensor = Tensor::from(win_size as i64);
+    let sample_rate_tensor = Tensor::from(sample_rate as i64);  // サンプリングレートを追加
 
     let _result = model.run(tvec![
         input_tensor.into(),
         n_fft_tensor.into(),
         hop_size_tensor.into(),
         win_size_tensor.into(),
+        sample_rate_tensor.into(),  // モデルにサンプリングレートを渡す
     ])?;
 
     Ok(())
