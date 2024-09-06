@@ -55,23 +55,24 @@ impl AudioTransformer {
             .unwrap()
             .with_model_from_file("G_best.onnx")
             .unwrap();
-
-        // `CowArray` を使用して、所有権のない形でデータを渡す
-        let input_array = Array::from_shape_vec((1, signal.len()), signal.to_vec()).unwrap();
+    
+        // 入力データを3次元に変換
+        let input_array = Array::from_shape_vec((1, 1, signal.len()), signal.to_vec()).unwrap();
         let cow_array = CowArray::from(input_array.view());
         let allocator_ptr = std::ptr::null_mut(); // 既存のアロケータがない場合はnullポインタを使用
         let binding = cow_array.into_dyn(); // cow_array から into_dyn() を一時的ではなく保持
         let input_tensor = Value::from_array(allocator_ptr, &binding).expect("Failed to create input tensor");
-        
+    
         // ONNXモデルで推論を実行
         let outputs = session.run(vec![input_tensor]).unwrap();
-
+    
         // 推論結果を取得してベクトルに変換
         let output_tensor: OrtOwnedTensor<f32, _> = outputs[0].try_extract().unwrap();
         let audio: Vec<f32> = output_tensor.view().to_owned().into_raw_vec();
-
+    
         audio
     }
+    
 }
 
 fn main() {
