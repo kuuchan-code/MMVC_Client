@@ -43,7 +43,7 @@ fn generate_spectrogram(wav_data: Array1<f32>, filter_length: usize, hop_length:
     Array2::from_shape_vec((spec_len, output_size), spec_flattened).unwrap()
 }
 
-fn run_onnx_inference(model_path: &str, spec: Array2<f32>, sid: i64) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+fn run_onnx_inference(model_path: &str, spec: Array2<f32>, wav: Array1<f32>, sid: i64, text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     // モデルをロード
     let model = tract_onnx::onnx()
         .model_for_path(model_path)?
@@ -54,11 +54,18 @@ fn run_onnx_inference(model_path: &str, spec: Array2<f32>, sid: i64) -> Result<V
     let spec_shape = spec.shape().to_vec();
     let spec_tensor = Tensor::from_shape(&spec_shape, spec.as_slice().unwrap())?;
 
+    // wavをTensorに変換
+    let wav_tensor = Tensor::from_shape(&[wav.len()], wav.as_slice().unwrap())?;
+
     // sidをTensorに変換
     let sid_tensor = Tensor::from(sid);
 
+    // textをバイト列に変換し、Tensorに変換
+    let text_bytes: Vec<u8> = text.bytes().collect();
+    let text_tensor = Tensor::from_shape(&[text_bytes.len()], &text_bytes)?;
+
     // 入力データを準備
-    let input = smallvec![spec_tensor.into(), sid_tensor.into()];
+    let input = smallvec![wav_tensor.into(), spec_tensor.into(), sid_tensor.into(), text_tensor.into()];
     
     // 推論実行
     let result = model.run(input)?;
@@ -73,8 +80,8 @@ fn run_onnx_inference(model_path: &str, spec: Array2<f32>, sid: i64) -> Result<V
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // パラメータ
     let sid = 2;
-    let _text = "m"; // 現在は使用しない
-    let model_path = "logs//runa//G_best.onnx";
+    let text = "m";
+    let model_path = "G_best.onnx";
     let wav_file_path = "emotion001.wav";
     let filter_length = 512;
     let hop_length = 128;
@@ -84,10 +91,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let wav_data = read_wav_file(wav_file_path)?;
 
     // 2. スペクトログラムの生成
-    let spec = generate_spectrogram(wav_data, filter_length, hop_length, win_length);
+    let spec = generate_spectrogram(wav_data.clone(), filter_length, hop_length, win_length);  // cloneしてwav_dataも保持
 
     // 3. ONNXモデルを用いた音声変換
-    let result = run_onnx_inference(model_path, spec, sid)?;
+    let result = run_onnx_inference(model_path, spec, wav_data, sid, text)?;
 
     // 4. 結果を処理（例: 結果の長さを表示）
     println!("推論結果の長さ: {}", result.len());
