@@ -79,35 +79,29 @@ fn load_onnx_model(model_path: &str) -> TractResult<TypedRunnableModel<TypedMode
 
     Ok(model)
 }
-
 fn run_voice_conversion(
     model: &TypedRunnableModel<TypedModel>,
-    input_data: Vec<f32>,
+    mut input_data: Vec<f32>,
     n_fft: usize,
     hop_size: usize,
     win_size: usize,
 ) -> TractResult<Vec<f32>> {
-    // モデルに渡すデータの形をモデルが期待する形状 (1, 257, length) に変換する
     let num_frames = input_data.len() / 257;
-    let mut reshaped_data = Vec::new();
 
-    // データを1x257x(num_frames)に変換
-    for frame in 0..num_frames {
-        reshaped_data.push(&input_data[frame * 257..(frame + 1) * 257]);
+    // フレーム数が少ない場合はゼロパディングを追加する
+    if num_frames < 2 {
+        let padding_frames = vec![0.0; 257 * (2 - num_frames)];
+        input_data.extend(padding_frames);
     }
 
-    // ONNXに渡す形状に変換
-    let input_tensor = Tensor::from_shape(&[1, 257, num_frames], &reshaped_data.concat())?;
+    // テンソルに変換
+    let input_tensor = Tensor::from_shape(&[1, 257, input_data.len() / 257], &input_data)?;
 
-    // スカラ値をテンソルに変換し、形を1に揃える
-    let n_fft_tensor = Tensor::from_shape(&[1], &[n_fft as i64])?;
-    let hop_size_tensor = Tensor::from_shape(&[1], &[hop_size as i64])?;
-    let win_size_tensor = Tensor::from_shape(&[1], &[win_size as i64])?;
-    println!("Input tensor: {:?}", input_tensor);
-    println!("n_fft_tensor: {:?}", n_fft_tensor);
-    println!("hop_size_tensor: {:?}", hop_size_tensor);
-    println!("win_size_tensor: {:?}", win_size_tensor);
-    
+    // スカラ値をテンソルに変換
+    let n_fft_tensor = Tensor::from(n_fft as i64);       // ここを修正
+    let hop_size_tensor = Tensor::from(hop_size as i64); // ここを修正
+    let win_size_tensor = Tensor::from(win_size as i64); // ここを修正
+
     // モデルを実行 (4つの入力に変更)
     let result = model.run(tvec![
         input_tensor.into(),
