@@ -25,7 +25,7 @@ impl Hyperparameters {
             dispose_conv1d_specs: 2,
             overlap: 64,
             target_id: 2,
-            channels: 80, // ここでフィルタバンクの数（例: 80）を設定
+            channels: 257, // チャネル数を257に設定（モデルが期待するチャネル数に合わせる）
         }
     }
 }
