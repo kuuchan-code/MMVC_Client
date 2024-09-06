@@ -1,152 +1,96 @@
+use hound;
+use ndarray::{Array1, Array2};
+use realfft::{RealFftPlanner, num_complex::Complex32};
 use tract_onnx::prelude::*;
-use rustfft::{FftPlanner, num_complex::Complex};
-use rustfft::num_traits::Zero;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use smallvec::SmallVec;
-use std::f32::consts::PI;
+use smallvec::smallvec;
 
-// 音声信号を前処理して正規化
-fn preprocess_audio(input: Vec<f32>, n_fft: usize, hop_size: usize) -> Vec<f32> {
-    let pad_size = (n_fft - hop_size) / 2;
-    let padded_input = pad_reflect(&input, pad_size);
-    padded_input
+fn read_wav_file(file_path: &str) -> Result<Array1<f32>, Box<dyn std::error::Error>> {
+    let mut reader = hound::WavReader::open(file_path)?;
+    let samples: Vec<i16> = reader.samples::<i16>().map(|s| s.unwrap()).collect();
+    
+    // 正規化: i16 -> f32 [-1.0, 1.0] の範囲
+    let wav_data: Array1<f32> = samples.iter().map(|&x| x as f32 / i16::MAX as f32).collect();
+    Ok(wav_data)
 }
 
-// STFT（短時間フーリエ変換）の計算
-fn compute_spectrogram(input: &[f32], n_fft: usize, hop_length: usize, win_size: usize, window: &[f32]) -> Vec<Complex<f32>> {
-    let mut planner = FftPlanner::new();
-    let fft = planner.plan_fft_forward(n_fft);
-    let mut stft_result = vec![];
+fn generate_spectrogram(wav_data: Array1<f32>, filter_length: usize, hop_length: usize, win_length: usize) -> Array2<f32> {
+    let mut fft = RealFftPlanner::<f32>::new();
+    let r2c = fft.plan_fft_forward(filter_length);
+    
+    let hann_window: Array1<f32> = Array1::from_iter((0..win_length).map(|x| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * x as f32 / win_length as f32).cos())));
 
-    for frame in input.chunks(hop_length) {
-        let mut padded_frame: Vec<Complex<f32>> = frame.iter()
-            .zip(window)
-            .map(|(&sample, &w)| Complex::new(sample * w, 0.0))
-            .collect();
+    // 音声データをSTFTで変換
+    let mut spectrogram = Vec::new();
+    let output_size = (filter_length / 2) + 1;  // 出力サイズを計算
+
+    let mut idx = 0;
+    while idx + win_length <= wav_data.len() {
+        let frame = wav_data.slice(ndarray::s![idx..(idx + win_length)]);
+        let mut input: Vec<f32> = frame.to_vec();
+        for (i, win) in hann_window.iter().enumerate() {
+            input[i] *= win;
+        }
+        let mut output = vec![Complex32::default(); output_size];
+        r2c.process(&mut input, &mut output).unwrap();
         
-        padded_frame.resize(n_fft, Complex::zero());
-        fft.process(&mut padded_frame);
-        stft_result.extend(padded_frame);
+        let magnitude: Vec<f32> = output.iter().map(|c| c.norm()).collect();
+        spectrogram.push(magnitude);
+        idx += hop_length;
     }
-
-    stft_result
+    
+    let spec_len = spectrogram.len();
+    let spec_flattened: Vec<f32> = spectrogram.into_iter().flatten().collect();
+    Array2::from_shape_vec((spec_len, output_size), spec_flattened).unwrap()
 }
 
-// ハン窓の生成
-fn generate_hann_window(size: usize) -> Vec<f32> {
-    (0..size).map(|i| (PI * i as f32 / size as f32).sin().powi(2)).collect()
-}
-
-// 反射パディング
-fn pad_reflect(input: &Vec<f32>, pad_size: usize) -> Vec<f32> {
-    let mut padded_input = Vec::with_capacity(input.len() + pad_size * 2);
-    let reflect_start = &input[0..pad_size];
-    let reflect_start_reversed: Vec<f32> = reflect_start.iter().rev().cloned().collect();
-    padded_input.extend(reflect_start_reversed);
-    padded_input.extend(input.iter().cloned());
-    let reflect_end = &input[input.len() - pad_size..];
-    let reflect_end_reversed: Vec<f32> = reflect_end.iter().rev().cloned().collect();
-    padded_input.extend(reflect_end_reversed);
-    padded_input
-}
-
-// 文字列を数値列に変換する関数
-fn string_to_ids(text: &str) -> Vec<i64> {
-    text.chars().map(|c| c as i64).collect()
-}
-
-// ONNXモデルの入力データ準備
-fn prepare_model_input(text: Vec<i64>, mut spec: Vec<f32>, wav: Vec<f32>, sid: i64) -> TractResult<TVec<TValue>> {
-    // フレーム数を計算し、257で割り切れない場合はゼロパディングを追加
-    let num_frames = (spec.len() + 256) / 257;  // フレーム数を切り上げ
-    let padding_size = 257 * num_frames - spec.len();  // 必要なパディングサイズ
-
-    // パディングが必要ならゼロを追加
-    if padding_size > 0 {
-        spec.extend(vec![0.0; padding_size]);
-    }
-
-    // テンソルに変換
-    let text_tensor = Tensor::from_shape(&[1, text.len()], &text)?;
-    let spec_tensor = Tensor::from_shape(&[1, 257, num_frames], &spec)?;
-    let wav_tensor = Tensor::from_shape(&[1, wav.len()], &wav)?;
-    let sid_tensor = Tensor::from(sid);
-
-    // モデルへの入力をまとめる
-    let model_inputs = tvec![
-        text_tensor.into(),
-        spec_tensor.into(),
-        wav_tensor.into(),
-        sid_tensor.into(),
-    ];
-
-    Ok(model_inputs)
-}
-
-
-
-// ONNXモデルの実行
-fn run_onnx_model(model: &TypedRunnableModel<TypedModel>, inputs: TVec<TValue>) -> TractResult<TVec<TValue>> {
-    let result = model.run(inputs)?;
-    Ok(result)
-}
-
-fn main() -> TractResult<()> {
-    // ONNXモデルの読み込み
-    let model_path = r"C:\Users\ku-chan\mmvc_client\logs\runa\G_best.onnx";
+fn run_onnx_inference(model_path: &str, spec: Array2<f32>, sid: i64) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+    // モデルをロード
     let model = tract_onnx::onnx()
         .model_for_path(model_path)?
         .into_optimized()?
         .into_runnable()?;
 
-    // CPALを使用してデフォルトの入力デバイスを取得
-    let host = cpal::default_host();
-    let input_device = host.default_input_device().expect("入力デバイスが見つかりません");
-    let config = input_device.default_input_config().unwrap();
+    // specをTensorに変換
+    let spec_shape = spec.shape().to_vec();
+    let spec_tensor = Tensor::from_shape(&spec_shape, spec.as_slice().unwrap())?;
+
+    // sidをTensorに変換
+    let sid_tensor = Tensor::from(sid);
+
+    // 入力データを準備
+    let input = smallvec![spec_tensor.into(), sid_tensor.into()];
     
-    let input_sample_rate = config.sample_rate().0 as usize;  // デバイスのサンプリングレート
-    let target_sample_rate = 24000;  // モデルが期待するサンプリングレート
-    let max_value = 32768.0;  // 正規化のための最大値
+    // 推論実行
+    let result = model.run(input)?;
 
-    let n_fft = 512;
-    let hop_size = 128;
-    let win_size = 512;
-    let hann_window = generate_hann_window(win_size);
+    // 推論結果を取得
+    let output: Tensor = result[0].clone().into_tensor();
+    let output_array: Array1<f32> = output.into_array::<f32>()?.into_dimensionality()?;
 
-    // `text` に "m" を渡す
-    let text = string_to_ids("m");  // 文字列 "m" を数値化
-    let sid = 2_i64;  // 話者IDを 2 に設定
+    Ok(output_array.to_vec())
+}
 
-    // 音声ストリームの設定
-    let err_fn = |err| eprintln!("エラーが発生しました: {}", err);
-    let stream = input_device.build_input_stream(
-        &config.into(),
-        move |data: &[i16], _: &cpal::InputCallbackInfo| {
-            // 1. `data` を `i16` から `f32` に正規化
-            let wav: Vec<f32> = data.iter().map(|&x| x as f32 / max_value).collect();
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // パラメータ
+    let sid = 2;
+    let _text = "m"; // 現在は使用しない
+    let model_path = "logs//runa//G_best.onnx";
+    let wav_file_path = "emotion001.wav";
+    let filter_length = 512;
+    let hop_length = 128;
+    let win_length = 512;
 
-            // 2. スペクトログラムを計算
-            let spec = compute_spectrogram(&wav, n_fft, hop_size, win_size, &hann_window);
-            let spec_data: Vec<f32> = spec.into_iter().flat_map(|c| vec![c.re, c.im]).collect();
+    // 1. wavファイルの読み込み
+    let wav_data = read_wav_file(wav_file_path)?;
 
-            // 3. モデルの入力データを準備
-            let model_inputs = prepare_model_input(text.clone(), spec_data, wav.clone(), sid).unwrap();
+    // 2. スペクトログラムの生成
+    let spec = generate_spectrogram(wav_data, filter_length, hop_length, win_length);
 
-            // 4. モデルの実行
-            let result = run_onnx_model(&model, model_inputs).unwrap();
-            
-            // 結果を処理（ここでは一時的に表示）
-            println!("モデルの結果: {:?}", result);
-        },
-        err_fn,
-        None,  // Option<Duration> を追加
-    ).unwrap();
+    // 3. ONNXモデルを用いた音声変換
+    let result = run_onnx_inference(model_path, spec, sid)?;
 
-    // ストリームを再生
-    stream.play().unwrap();
+    // 4. 結果を処理（例: 結果の長さを表示）
+    println!("推論結果の長さ: {}", result.len());
     
-    // ストリームの実行を10秒間待機
-    std::thread::sleep(std::time::Duration::from_secs(10));
-
     Ok(())
 }
