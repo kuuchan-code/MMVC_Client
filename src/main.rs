@@ -3,6 +3,7 @@ use tract_onnx::prelude::*;
 use tract_ndarray::Array1;
 use rubato::{FftFixedInOut, Resampler};
 use realfft::RealFftPlanner;
+use cpal::BufferSize;
 
 fn main() -> TractResult<()> {
     // ONNXモデルを読み込み
@@ -27,9 +28,16 @@ fn main() -> TractResult<()> {
         None
     };
 
+    // ストリーム設定時にバッファサイズを指定
+    let stream_config = cpal::StreamConfig {
+        channels: config.channels(),
+        sample_rate: config.sample_rate(),
+        buffer_size: BufferSize::Fixed(960),  // 960にバッファサイズを固定
+    };
+
     // 入力ストリームを設定
     let stream = input_device.build_input_stream(
-        &config.into(),
+        &stream_config,
         move |data: &[f32], _: &cpal::InputCallbackInfo| {
             // 入力データをリサンプリング
             let data_resampled = if let Some(ref mut resampler) = resampler {
