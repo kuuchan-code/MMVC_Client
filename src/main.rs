@@ -58,12 +58,12 @@ impl AudioTransformer {
     
         // 入力データを 257 にリサイズする（ゼロパディングを使用）
         let mut padded_signal = vec![0.0; 257];
-        for (i, &s) in signal.iter().enumerate().take(257) {
+        for (i, &s) in signal.iter().take(257).enumerate() {
             padded_signal[i] = s;
         }
     
-        // 入力データを3次元に変換（[バッチ, 257, データ長] の形）
-        let input_array = Array::from_shape_vec((1, 257, padded_signal.len()), padded_signal).unwrap();
+        // 入力データを3次元に変換（[バッチ, 257, 1] の形）
+        let input_array = Array::from_shape_vec((1, 257, 1), padded_signal).expect("Shape error");
         let cow_array = CowArray::from(input_array.view());
         let allocator_ptr = std::ptr::null_mut(); // 既存のアロケータがない場合はnullポインタを使用
         let binding = cow_array.into_dyn();
@@ -78,6 +78,7 @@ impl AudioTransformer {
     
         audio
     }
+    
     
     
 }
