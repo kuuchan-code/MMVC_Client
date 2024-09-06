@@ -74,37 +74,7 @@ fn load_onnx_model(model_path: &str) -> TractResult<TypedRunnableModel<TypedMode
     Ok(model)
 }
 
-fn calculate_spectrogram(y: &[f32], n_fft: usize, hop_size: usize, win_size: usize) -> Vec<Array1<f32>> {
-    let mut planner = RealFftPlanner::<f32>::new();
-    let r2c = planner.plan_fft_forward(n_fft);
-
-    let hann_window: Vec<f32> = (0..win_size)
-        .map(|i| 0.5 * (1.0 - (2.0 * std::f32::consts::PI * i as f32 / win_size as f32).cos()))
-        .collect();
-
-    let padded: Vec<f32> = vec![0.0; (n_fft - hop_size) / 2]
-        .into_iter()
-        .chain(y.iter().cloned())
-        .chain(vec![0.0; (n_fft - hop_size) / 2])
-        .collect();
-
-    let mut spectrum = vec![];
-    for chunk in padded.chunks(hop_size) {
-        let mut input: Vec<f32> = chunk.iter().zip(&hann_window).map(|(&s, &w)| s * w).collect();
-        input.resize(n_fft, 0.0);
-        let mut output = r2c.make_output_vec();
-        r2c.process(&mut input, &mut output).unwrap();
-
-        let power_spectrum: Array1<f32> = Array1::from(output.iter().map(|c| c.norm_sqr().sqrt()).collect::<Vec<_>>());
-        spectrum.push(power_spectrum);
-    }
-    spectrum
-}
-
 fn run_voice_conversion(model: &TypedRunnableModel<TypedModel>, input_data: Vec<f32>, n_fft: usize, hop_size: usize, win_size: usize, sample_rate: usize) -> TractResult<Vec<f32>> {
-    // スペクトログラムを計算 (必要に応じて処理する)
-    let _spectrogram = calculate_spectrogram(&input_data, n_fft, hop_size, win_size);
-    
     let input_tensor = Array1::from(input_data).into_tensor(); 
     let n_fft_tensor = Tensor::from(n_fft as i64);
     let hop_size_tensor = Tensor::from(hop_size as i64);
@@ -128,7 +98,6 @@ fn run_voice_conversion(model: &TypedRunnableModel<TypedModel>, input_data: Vec<
 
     Ok(output)
 }
-
 
 fn output_audio(data: Vec<f32>, config: &cpal::StreamConfig) {
     let host = cpal::default_host();
