@@ -1,5 +1,5 @@
 use ort::{Environment, SessionBuilder, Value, GraphOptimizationLevel};
-use ndarray::{Array, Array2, IxDyn, CowArray};
+use ndarray::{Array, Array2, Array3, IxDyn, CowArray}; // Array2, Array3をインポート
 use std::sync::Arc;
 use hound; // WAVファイル処理用
 
@@ -12,6 +12,7 @@ struct Hyperparameters {
     dispose_conv1d_specs: usize,
     overlap: usize,
     target_id: i64,
+    channels: usize, // 3次元入力のためにチャネルを追加
 }
 
 impl Hyperparameters {
@@ -24,6 +25,7 @@ impl Hyperparameters {
             dispose_conv1d_specs: 2,
             overlap: 64,
             target_id: 2,
+            channels: 80, // ここでフィルタバンクの数（例: 80）を設定
         }
     }
 }
@@ -41,9 +43,9 @@ fn load_wav(path: &str) -> Vec<f32> {
 // ONNXモデルを推論する関数
 fn run_onnx_model(
     session: &ort::Session,
-    spec: &Array2<f32>,
-    spec_lengths: &Array2<i64>,
-    sid_src: &Array2<i64>,
+    spec: &Array3<f32>, // 3次元配列
+    spec_lengths: &Array2<i64>, // 2次元配列
+    sid_src: &Array2<i64>, // 2次元配列
     sid_target: i64,
 ) -> Vec<f32> {
     // 各CowArrayを事前に変数として保持する
@@ -73,11 +75,12 @@ fn audio_trans(
     signal: Vec<f32>,
     target_id: i64,
 ) -> Vec<f32> {
-    let signal = Array::from_shape_vec((1, signal.len()), signal).unwrap();
+    let signal_len = signal.len();
+    let signal = Array::from_shape_vec((1, hparams.channels, signal_len / hparams.channels), signal).unwrap(); // 3次元配列に変換
     let spec = signal.mapv(|x| x / hparams.max_wav_value); // 正規化
 
     // ダミーの長さ（サンプルの長さ）
-    let spec_lengths = Array::from_elem((1, 1), spec.shape()[1] as i64); // 2次元配列
+    let spec_lengths = Array::from_elem((1, 1), spec.shape()[2] as i64); // 3次元目の長さ（時間ステップ）
     let sid_src = Array::from_elem((1, 1), hparams.target_id); // 2次元配列
 
     // モデルの実行
