@@ -1,106 +1,124 @@
-use ort::{environment::Environment, session::SessionBuilder, tensor::OrtOwnedTensor, Value};
-use ndarray::{Array, CowArray};
+use ort::{Environment, SessionBuilder, Value, GraphOptimizationLevel};
+use ndarray::{Array, Array2, IxDyn, CowArray};
 use std::sync::Arc;
+use hound; // WAVファイル処理用
 
-struct AudioTransformer {
-    hop_length: usize,
+// ハイパーパラメータ構造体
+struct Hyperparameters {
+    sample_rate: u32,
     max_wav_value: f32,
-    sample_rate: usize,
-    gpu_id: Option<i32>,
-    ort_session: Arc<Environment>,
+    hop_length: usize,
+    dispose_stft_specs: usize,
+    dispose_conv1d_specs: usize,
+    overlap: usize,
+    target_id: i64,
 }
 
-impl AudioTransformer {
-    pub fn new(hop_length: usize, max_wav_value: f32, sample_rate: usize, gpu_id: Option<i32>, ort_session: Arc<Environment>) -> Self {
-        Self {
-            hop_length,
-            max_wav_value,
-            sample_rate,
-            gpu_id,
-            ort_session,
+impl Hyperparameters {
+    fn new() -> Self {
+        Hyperparameters {
+            sample_rate: 24000,
+            max_wav_value: 32768.0,
+            hop_length: 128,
+            dispose_stft_specs: 2,
+            dispose_conv1d_specs: 2,
+            overlap: 64,
+            target_id: 2,
         }
     }
-
-    pub fn audio_transform(
-        &self,
-        input_data: &[u8],
-        target_id: i64,
-        stft_padding: usize,
-        conv1d_padding: usize,
-    ) -> Vec<u8> {
-        let _stft_length = stft_padding * self.hop_length;
-        let conv1d_length = conv1d_padding * self.hop_length;
-
-        // 入力バイトデータをf32に変換
-        let signal: Vec<f32> = input_data
-            .chunks(2)
-            .map(|bytes| i16::from_le_bytes([bytes[0], bytes[1]]) as f32 / self.max_wav_value)
-            .collect();
-
-        // 音声変換処理
-        let audio = self.perform_voice_conversion_onnx(&signal, target_id);
-
-        // conv1d paddingを考慮した音声のトリミング
-        let trimmed_audio = &audio[conv1d_length..audio.len() - conv1d_padding];
-
-        // 結果をint16に変換してバイトに変換
-        trimmed_audio
-            .iter()
-            .flat_map(|&sample| ((sample * self.max_wav_value) as i16).to_le_bytes().to_vec())
-            .collect()
-    }
-
-    fn perform_voice_conversion_onnx(&self, signal: &[f32], target_id: i64) -> Vec<f32> {
-        let session = SessionBuilder::new(&self.ort_session)
-            .unwrap()
-            .with_model_from_file("G_best.onnx")
-            .unwrap();
-    
-        // 入力データを 257 にリサイズする（ゼロパディングを使用）
-        let mut padded_signal = vec![0.0; 257];
-        for (i, &s) in signal.iter().take(257).enumerate() {
-            padded_signal[i] = s;
-        }
-    
-        // 入力データを3次元に変換（[バッチ, 257, 1] の形）
-        let input_array = Array::from_shape_vec((1, 257, 1), padded_signal).expect("Shape error");
-        let cow_array = CowArray::from(input_array.view());
-        let allocator_ptr = std::ptr::null_mut(); // 既存のアロケータがない場合はnullポインタを使用
-        let binding = cow_array.into_dyn();
-        let input_tensor = Value::from_array(allocator_ptr, &binding).expect("Failed to create input tensor");
-    
-        // ONNXモデルで推論を実行
-        let outputs = session.run(vec![input_tensor]).unwrap();
-    
-        // 推論結果を取得してベクトルに変換
-        let output_tensor: OrtOwnedTensor<f32, _> = outputs[0].try_extract().unwrap();
-        let audio: Vec<f32> = output_tensor.view().to_owned().into_raw_vec();
-    
-        audio
-    }
-    
-    
-    
 }
 
+// WAVファイルをロードする関数
+fn load_wav(path: &str) -> Vec<f32> {
+    let mut reader = hound::WavReader::open(path).expect("Failed to open WAV file.");
+    let spec = reader.spec();
+    assert_eq!(spec.channels, 1, "Only mono WAV files are supported.");
+    reader.samples::<i16>()
+        .map(|s| s.unwrap() as f32 / 32768.0)
+        .collect()
+}
+
+// ONNXモデルを推論する関数
+fn run_onnx_model(
+    session: &ort::Session,
+    spec: &Array2<f32>,
+    spec_lengths: &Array2<i64>,
+    sid_src: &Array2<i64>,
+    sid_target: i64,
+) -> Vec<f32> {
+    // 各CowArrayを事前に変数として保持する
+    let spec_cow = CowArray::from(spec.clone().into_dyn());
+    let spec_lengths_cow = CowArray::from(spec_lengths.clone().into_dyn());
+    let sid_src_cow = CowArray::from(sid_src.clone().into_dyn());
+    let sid_tgt_array_cow = CowArray::from(Array::from_elem(IxDyn(&[]), sid_target).into_dyn());
+
+    let inputs = vec![
+        Value::from_array(session.allocator(), &spec_cow).unwrap(),
+        Value::from_array(session.allocator(), &spec_lengths_cow).unwrap(),
+        Value::from_array(session.allocator(), &sid_src_cow).unwrap(),
+        Value::from_array(session.allocator(), &sid_tgt_array_cow).unwrap(),
+    ];
+
+    let outputs: Vec<Value> = session.run(inputs).unwrap();
+    let audio_output: ort::tensor::OrtOwnedTensor<f32, _> = outputs[0].try_extract().unwrap();
+
+    // OrtOwnedTensor を ndarray の Array に変換し、それを Vec に変換
+    audio_output.view().to_owned().into_raw_vec()
+}
+
+// 音声処理関数
+fn audio_trans(
+    hparams: &Hyperparameters,
+    session: &ort::Session,
+    signal: Vec<f32>,
+    target_id: i64,
+) -> Vec<f32> {
+    let signal = Array::from_shape_vec((1, signal.len()), signal).unwrap();
+    let spec = signal.mapv(|x| x / hparams.max_wav_value); // 正規化
+
+    // ダミーの長さ（サンプルの長さ）
+    let spec_lengths = Array::from_elem((1, 1), spec.shape()[1] as i64); // 2次元配列
+    let sid_src = Array::from_elem((1, 1), hparams.target_id); // 2次元配列
+
+    // モデルの実行
+    let audio = run_onnx_model(session, &spec, &spec_lengths, &sid_src, target_id);
+    
+    audio
+}
+
+// メイン関数
 fn main() {
-    // 環境の作成
-    let environment = Arc::new(Environment::builder().with_name("audio_transformer").build().unwrap());
+    // ハイパーパラメータの初期化
+    let hparams = Hyperparameters::new();
 
-    // オーディオトランスフォーマーの初期化
-    let transformer = AudioTransformer::new(
-        128,           // hop_length
-        32768.0,       // max_wav_value
-        24000,         // sample_rate
-        None,          // gpu_id
-        environment,   // ort_session
-    );
+    // ONNX環境とセッションの初期化
+    let environment = Arc::new(Environment::builder()
+        .with_name("MMVC_Client")
+        .build()
+        .unwrap());
+    
+    let session = SessionBuilder::new(&environment)
+        .unwrap() // SessionBuilder を取得
+        .with_optimization_level(GraphOptimizationLevel::Level3) // Optimization Level を Level3 に
+        .unwrap() // Optimization Level の設定後に unwrap
+        .with_model_from_file("G_best.onnx") // モデルのロード
+        .unwrap();
 
-    // サンプルデータを用いて変換を実行
-    let input_data = vec![0u8; 1024];  // 仮の入力データ
-    let target_id = 2;                 // 話者IDのサンプル
-    let output = transformer.audio_transform(&input_data, target_id, 2, 2);
+    // WAVファイルを読み込み
+    let input_wav = load_wav("emotion001.wav");
 
-    // 結果を処理
-    println!("変換されたオーディオデータ: {:?}", output);
+    // 音声処理を実行
+    let output_wav = audio_trans(&hparams, &session, input_wav, hparams.target_id);
+
+    // 処理結果をファイルに保存
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: hparams.sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    let mut writer = hound::WavWriter::create("output.wav", spec).unwrap();
+    for sample in output_wav {
+        writer.write_sample((sample * hparams.max_wav_value) as i16).unwrap();
+    }
 }
