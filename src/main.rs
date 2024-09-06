@@ -82,9 +82,9 @@ fn load_onnx_model(model_path: &str) -> TractResult<TypedRunnableModel<TypedMode
 fn run_voice_conversion(
     model: &TypedRunnableModel<TypedModel>,
     mut input_data: Vec<f32>,
-    n_fft: usize,
-    hop_size: usize,
-    win_size: usize,
+    n_fft: i64,  // 型をi64に変更
+    hop_size: i64,  // 型をi64に変更
+    win_size: i64,  // 型をi64に変更
 ) -> TractResult<Vec<f32>> {
     let num_frames = input_data.len() / 257;
 
@@ -98,10 +98,10 @@ fn run_voice_conversion(
     // 入力データを (1, 257, total_frames) に整形してテンソルに変換
     let input_tensor = Tensor::from_shape(&[1, 257, total_frames], &input_data)?;
 
-    // スカラ値をテンソルに変換
-    let n_fft_tensor = Tensor::from(n_fft as i64);
-    let hop_size_tensor = Tensor::from(hop_size as i64);
-    let win_size_tensor = Tensor::from(win_size as i64);
+    // スカラ値をi64のテンソルに変換
+    let n_fft_tensor = Tensor::from(n_fft);
+    let hop_size_tensor = Tensor::from(hop_size);
+    let win_size_tensor = Tensor::from(win_size);
 
     // モデルを実行
     let result = model.run(tvec![
@@ -120,4 +120,3 @@ fn run_voice_conversion(
 
     Ok(output)
 }
-
