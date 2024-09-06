@@ -42,30 +42,31 @@ fn generate_spectrogram(wav_data: Array1<f32>, filter_length: usize, hop_length:
     let spec_flattened: Vec<f32> = spectrogram.into_iter().flatten().collect();
     Array2::from_shape_vec((spec_len, output_size), spec_flattened).unwrap()
 }
-
-fn run_onnx_inference(model_path: &str, spec: Array2<f32>, wav: Array1<f32>, sid: i64, text: &str) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
+fn run_onnx_inference(
+    model_path: &str, 
+    spec: Array2<f32>, 
+    sid_src: i64, 
+    sid_tgt: i64
+) -> Result<Vec<f32>, Box<dyn std::error::Error>> {
     // モデルをロード
     let model = tract_onnx::onnx()
         .model_for_path(model_path)?
         .into_optimized()?
         .into_runnable()?;
 
-    // specをTensorに変換
-    let spec_shape = spec.shape().to_vec();
-    let spec_tensor = Tensor::from_shape(&spec_shape, spec.as_slice().unwrap())?;
+    // spec の shape を [1, 257, length] に整形
+    let spec_shape = spec.shape();
+    let spec_tensor = Tensor::from_shape(&[1, spec_shape[0], spec_shape[1]], spec.as_slice().unwrap())?;
 
-    // wavをTensorに変換
-    let wav_tensor = Tensor::from_shape(&[wav.len()], wav.as_slice().unwrap())?;
+    // lengths (specの長さを渡す)
+    let lengths_tensor = Tensor::from(spec_shape[1] as i64);
 
-    // sidをTensorに変換
-    let sid_tensor = Tensor::from(sid);
-
-    // textをバイト列に変換し、Tensorに変換
-    let text_bytes: Vec<u8> = text.bytes().collect();
-    let text_tensor = Tensor::from_shape(&[text_bytes.len()], &text_bytes)?;
+    // sid_src, sid_tgt を Tensor に変換
+    let sid_src_tensor = Tensor::from(sid_src);
+    let sid_tgt_tensor = Tensor::from(sid_tgt);
 
     // 入力データを準備
-    let input = smallvec![wav_tensor.into(), spec_tensor.into(), sid_tensor.into(), text_tensor.into()];
+    let input = smallvec![spec_tensor.into(), lengths_tensor.into(), sid_src_tensor.into(), sid_tgt_tensor.into()];
     
     // 推論実行
     let result = model.run(input)?;
@@ -79,8 +80,8 @@ fn run_onnx_inference(model_path: &str, spec: Array2<f32>, wav: Array1<f32>, sid
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // パラメータ
-    let sid = 2;
-    let text = "m";
+    let sid_src = 0;  // ソース話者ID
+    let sid_tgt = 2;  // ターゲット話者ID
     let model_path = "G_best.onnx";
     let wav_file_path = "emotion001.wav";
     let filter_length = 512;
@@ -94,7 +95,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let spec = generate_spectrogram(wav_data.clone(), filter_length, hop_length, win_length);  // cloneしてwav_dataも保持
 
     // 3. ONNXモデルを用いた音声変換
-    let result = run_onnx_inference(model_path, spec, wav_data, sid, text)?;
+    let result = run_onnx_inference(model_path, spec, sid_src, sid_tgt)?;
 
     // 4. 結果を処理（例: 結果の長さを表示）
     println!("推論結果の長さ: {}", result.len());
