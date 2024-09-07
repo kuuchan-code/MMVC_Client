@@ -1,11 +1,11 @@
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{SampleRate, StreamConfig};
 use hound;
 use ndarray::{Array1, Array3, CowArray};
 use ort::{Environment, GraphOptimizationLevel, SessionBuilder, Value};
+use rubato::{FftFixedInOut, Resampler};
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::f32::consts::PI;
-use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleRate, StreamConfig};
-use rubato::{FftFixedInOut, Resampler};
 use std::sync::{Arc, Mutex};
 
 // ハイパーパラメータ構造体
@@ -89,42 +89,49 @@ fn record_and_resample(hparams: &Hyperparameters) -> Vec<f32> {
     let input_device = host
         .default_input_device()
         .expect("Failed to get default input device.");
-    
-        let input_config = input_device.default_input_config().unwrap();
-    
+
+    let input_config = input_device.default_input_config().unwrap();
+
     // モノラルに変換し、必要なサンプルレートにリサンプリング
     let channels = input_config.channels();
     let input_sample_rate = input_config.sample_rate().0;
-    
+
     // リサンプラーの設定
-    let mut resampler = FftFixedInOut::<f32>::new(input_sample_rate as usize, hparams.sample_rate as usize, 480, 1).unwrap();
+    let mut resampler = FftFixedInOut::<f32>::new(
+        input_sample_rate as usize,
+        hparams.sample_rate as usize,
+        480,
+        1,
+    )
+    .unwrap();
     let signal = Arc::new(Mutex::new(Vec::new()));
-    
+
     let signal_clone = Arc::clone(&signal);
     let input_stream_config: StreamConfig = input_config.into(); // 変換
 
-    let stream = input_device.build_input_stream(
-        &input_stream_config,
-        move |data: &[f32], _: &cpal::InputCallbackInfo| {
-            let mut input_signal = signal_clone.lock().unwrap();
-            let mono_signal: Vec<f32> = data
-                .chunks(channels as usize)
-                .map(|chunk| chunk.iter().sum::<f32>() / channels as f32)
-                .collect();
-            let resampled = resampler.process(&[mono_signal], None).unwrap();
-            input_signal.extend_from_slice(&resampled[0]);
-        },
-        move |err| {
-            eprintln!("Error occurred on input stream: {}", err);
-        },
-        None, // ここでOption<Duration>を指定
-    ).unwrap();
-    
-    
+    let stream = input_device
+        .build_input_stream(
+            &input_stream_config,
+            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                let mut input_signal = signal_clone.lock().unwrap();
+                let mono_signal: Vec<f32> = data
+                    .chunks(channels as usize)
+                    .map(|chunk| chunk.iter().sum::<f32>() / channels as f32)
+                    .collect();
+                let resampled = resampler.process(&[mono_signal], None).unwrap();
+                input_signal.extend_from_slice(&resampled[0]);
+            },
+            move |err| {
+                eprintln!("Error occurred on input stream: {}", err);
+            },
+            None, // ここでOption<Duration>を指定
+        )
+        .unwrap();
+
     stream.play().unwrap();
-    
+
     std::thread::sleep(std::time::Duration::from_secs(5)); // 5秒間録音
-    
+
     let final_signal = signal.lock().unwrap().clone();
     final_signal
 }
@@ -134,30 +141,25 @@ fn play_output(output_signal: Vec<f32>, hparams: &Hyperparameters) {
     let output_device = host
         .default_output_device()
         .expect("Failed to get default output device.");
-    
+
     let output_config = output_device.default_output_config().unwrap();
-    let output_sample_rate = output_config.sample_rate().0;
-    
-    // 出力リサンプラー
-    let mut resampler = FftFixedInOut::<f32>::new(hparams.sample_rate as usize, output_sample_rate as usize, 480, 1).unwrap();
-    
-    let resampled_signal = resampler.process(&[output_signal], None).unwrap();
+
     let output_stream_config: StreamConfig = output_config.into(); // 変換
 
     let stream = output_device.build_output_stream(
         &output_stream_config,
         move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            let output_length = output.len().min(resampled_signal[0].len());
-            output[..output_length].copy_from_slice(&resampled_signal[0][..output_length]);
+            let output_length = output.len().min(output_signal.len());
+            output[..output_length].copy_from_slice(&output_signal[..output_length]);
         },
         move |err| {
             eprintln!("Error occurred on output stream: {}", err);
         },
-        None, // ここでOption<Duration>を指定
+        None,
     ).unwrap();
-    
+
     stream.play().unwrap();
-    
+
     std::thread::sleep(std::time::Duration::from_secs(5)); // 出力を5秒間再生
 }
 // ONNXモデルを推論する関数
@@ -225,41 +227,43 @@ fn save_wav(signal: Vec<f32>, file_path: &str, hparams: &Hyperparameters) {
         bits_per_sample: 16,
         sample_format: hound::SampleFormat::Int,
     };
-    
+
     let mut writer = hound::WavWriter::create(file_path, spec).unwrap();
-    
+
     for sample in signal {
         let scaled_sample = (sample * hparams.max_wav_value) as i16; // スケーリングしてi16に変換
         writer.write_sample(scaled_sample).unwrap();
     }
-    
+
     writer.finalize().unwrap();
 }
 // メイン関数
 fn main() {
     let hparams = Hyperparameters::new();
-    
+
     let environment = Arc::new(
         Environment::builder()
             .with_name("MMVC_Client")
             .build()
             .unwrap(),
     );
-    
+
     let session = SessionBuilder::new(&environment)
         .unwrap()
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .unwrap()
         .with_model_from_file("G_best.onnx")
         .unwrap();
-    
+
     // マイクから音声を取得してリサンプリング
     let input_signal = record_and_resample(&hparams);
     // 取得した信号をファイルに保存
     save_wav(input_signal.clone(), "input_signal.wav", &hparams);
     // 音声処理
     let output_signal = audio_trans(&hparams, &session, input_signal, hparams.target_id);
-    
+
     // 処理後の音声を出力デバイスに再生
     save_wav(output_signal.clone(), "output_signal.wav", &hparams);
+    // 処理後の音声をスピーカーに出力
+    play_output(output_signal, &hparams);
 }
