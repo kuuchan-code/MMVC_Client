@@ -1,5 +1,5 @@
 use hound;
-use ndarray::{Array, Array1, Array2, Array3, CowArray, IxDyn}; // IxDyn, CowArrayを追加
+use ndarray::Array1, Array3, CowArray};
 use ort::{Environment, GraphOptimizationLevel, SessionBuilder, Value};
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::f32::consts::PI;
@@ -79,26 +79,26 @@ fn stft(signal: &Vec<f32>, hparams: &Hyperparameters) -> Array3<f32> {
 
     spectrogram
 }
-
 // ONNXモデルを推論する関数
 fn run_onnx_model(
     session: &ort::Session,
     spec: &Array3<f32>,         // 3次元配列
     spec_lengths: &Array1<i64>, // 1次元配列
-    sid_src: &Array1<i64>,      // 1次元配列に修正
+    sid_src: &Array1<i64>,      // 1次元配列
     sid_target: i64,
 ) -> Vec<f32> {
     // 各CowArrayを事前に変数として保持する
     let spec_cow = CowArray::from(spec.clone().into_dyn());
     let spec_lengths_cow = CowArray::from(spec_lengths.clone().into_dyn());
-    let sid_src_cow = CowArray::from(sid_src.clone().into_dyn()); // 1次元の`sid_src`
-    let sid_tgt_array_cow = CowArray::from(Array::from_elem(IxDyn(&[]), sid_target).into_dyn());
+    let sid_src_cow = CowArray::from(sid_src.clone().into_dyn());
+    // sid_tgtを1次元配列に修正
+    let sid_tgt_array_cow = CowArray::from(Array1::from_elem(1, sid_target).into_dyn());
 
     let inputs = vec![
         Value::from_array(session.allocator(), &spec_cow).unwrap(),
         Value::from_array(session.allocator(), &spec_lengths_cow).unwrap(),
         Value::from_array(session.allocator(), &sid_src_cow).unwrap(),
-        Value::from_array(session.allocator(), &sid_tgt_array_cow).unwrap(),
+        Value::from_array(session.allocator(), &sid_tgt_array_cow).unwrap(), // 修正済み
     ];
 
     let outputs: Vec<Value> = session.run(inputs).unwrap();
@@ -129,7 +129,7 @@ fn audio_trans(
 
     // spec_lengthsを1次元に修正
     let spec_lengths = Array1::from_elem(1, spec.shape()[2] as i64); // 1次元配列
-    let sid_src = Array1::from_elem(1, hparams.target_id); // 1次元配列に修正
+    let sid_src = Array1::from_elem(1, hparams.target_id); // 1次元配列
 
     // モデルの実行
     let audio = run_onnx_model(session, &spec, &spec_lengths, &sid_src, target_id);
