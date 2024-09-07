@@ -1,5 +1,5 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use cpal::{SampleRate, StreamConfig};
+use cpal::StreamConfig;
 use hound;
 use ndarray::{Array1, Array3, CowArray};
 use ort::{Environment, GraphOptimizationLevel, SessionBuilder, Value};
@@ -135,33 +135,6 @@ fn record_and_resample(hparams: &Hyperparameters) -> Vec<f32> {
     let final_signal = signal.lock().unwrap().clone();
     final_signal
 }
-// 処理結果を出力デバイスに送る関数
-fn play_output(output_signal: Vec<f32>, hparams: &Hyperparameters) {
-    let host = cpal::default_host();
-    let output_device = host
-        .default_output_device()
-        .expect("Failed to get default output device.");
-
-    let output_config = output_device.default_output_config().unwrap();
-
-    let output_stream_config: StreamConfig = output_config.into(); // 変換
-
-    let stream = output_device.build_output_stream(
-        &output_stream_config,
-        move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            let output_length = output.len().min(output_signal.len());
-            output[..output_length].copy_from_slice(&output_signal[..output_length]);
-        },
-        move |err| {
-            eprintln!("Error occurred on output stream: {}", err);
-        },
-        None,
-    ).unwrap();
-
-    stream.play().unwrap();
-
-    std::thread::sleep(std::time::Duration::from_secs(5)); // 出力を5秒間再生
-}
 // ONNXモデルを推論する関数
 fn run_onnx_model(
     session: &ort::Session,
@@ -237,7 +210,59 @@ fn save_wav(signal: Vec<f32>, file_path: &str, hparams: &Hyperparameters) {
 
     writer.finalize().unwrap();
 }
-// メイン関数
+
+fn play_output(signal: Vec<f32>, hparams: &Hyperparameters) {
+    let host = cpal::default_host();
+    let output_device = host
+        .default_output_device()
+        .expect("Failed to get default output device.");
+    
+    let output_config = output_device.default_output_config().unwrap();
+    
+    let output_sample_rate = output_config.sample_rate().0;
+    
+    // リサンプラーの設定（マイク入力時のリサンプルとは逆に、モデルのサンプリングレートから出力デバイスのサンプリングレートにリサンプル）
+    let mut resampler = FftFixedInOut::<f32>::new(
+        hparams.sample_rate as usize,
+        output_sample_rate as usize,
+        100000,
+        1,
+    )
+    .unwrap();
+
+    // リサンプルされた音声信号
+    let resampled_signal = resampler.process(&[signal], None).unwrap();
+    let output_signal = resampled_signal[0].clone();
+
+    let channels = output_config.channels() as usize;
+    let mut sample_index = 0;
+
+    let stream = output_device
+        .build_output_stream(
+            &output_config.into(),
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                for frame in data.chunks_mut(channels) {
+                    let sample = if sample_index < output_signal.len() {
+                        output_signal[sample_index]
+                    } else {
+                        0.0 // 信号が終わったら無音にする
+                    };
+                    for channel in frame.iter_mut() {
+                        *channel = sample;
+                    }
+                    sample_index += 1;
+                }
+            },
+            move |err| {
+                eprintln!("Error occurred on output stream: {}", err);
+            },
+            None
+        )
+        .unwrap();
+
+    stream.play().unwrap();
+    std::thread::sleep(std::time::Duration::from_secs(5)); // 5秒間再生（音声長に応じて調整）
+}
 fn main() {
     let hparams = Hyperparameters::new();
 
