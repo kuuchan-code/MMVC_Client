@@ -210,7 +210,7 @@ fn play_output(
     let mut resampler = FftFixedInOut::<f32>::new(
         hparams.sample_rate as usize,
         output_sample_rate as usize,
-        512,
+        2048,
         1,
     )
     .unwrap();
