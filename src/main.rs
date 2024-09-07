@@ -1,12 +1,13 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::StreamConfig;
-use hound;
 use ndarray::{Array1, Array3, CowArray};
-use ort::{Environment, GraphOptimizationLevel, SessionBuilder, Value};
+use ort::{GraphOptimizationLevel, Value};
 use rubato::{FftFixedInOut, Resampler};
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::f32::consts::PI;
 use std::sync::{Arc, Mutex};
+use ort::{Environment, ExecutionProvider, SessionBuilder, OrtResult};
+
 
 // ハイパーパラメータ構造体
 struct Hyperparameters {
@@ -29,17 +30,6 @@ impl Hyperparameters {
             target_id: 2,  // 任意の話者ID
         }
     }
-}
-
-// WAVファイルをロードする関数
-fn load_wav(path: &str) -> Vec<f32> {
-    let mut reader = hound::WavReader::open(path).expect("Failed to open WAV file.");
-    let spec = reader.spec();
-    assert_eq!(spec.channels, 1, "Only mono WAV files are supported.");
-    reader
-        .samples::<i16>()
-        .map(|s| s.unwrap() as f32 / 32768.0)
-        .collect()
 }
 
 // 音声信号にパディングを追加
@@ -84,7 +74,11 @@ fn stft(signal: &Vec<f32>, hparams: &Hyperparameters) -> Array3<f32> {
 }
 
 // マイク入力から音声を取得しリサンプリングする関数
-fn record_and_resample(hparams: &Hyperparameters) -> Vec<f32> {
+fn record_and_resample(
+    hparams: &Hyperparameters,
+    signal: Arc<Mutex<Vec<f32>>>,
+    buffer_size: usize
+) -> cpal::Stream {
     let host = cpal::default_host();
     let input_device = host
         .default_input_device()
@@ -100,26 +94,33 @@ fn record_and_resample(hparams: &Hyperparameters) -> Vec<f32> {
     let mut resampler = FftFixedInOut::<f32>::new(
         input_sample_rate as usize,
         hparams.sample_rate as usize,
-        480,
+        buffer_size,
         1,
     )
     .unwrap();
-    let signal = Arc::new(Mutex::new(Vec::new()));
 
-    let signal_clone = Arc::clone(&signal);
     let input_stream_config: StreamConfig = input_config.into(); // 変換
+
+    let mut buffer = Vec::new();
 
     let stream = input_device
         .build_input_stream(
             &input_stream_config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                let mut input_signal = signal_clone.lock().unwrap();
+                let mut input_signal = signal.lock().unwrap();
                 let mono_signal: Vec<f32> = data
                     .chunks(channels as usize)
                     .map(|chunk| chunk.iter().sum::<f32>() / channels as f32)
                     .collect();
-                let resampled = resampler.process(&[mono_signal], None).unwrap();
-                input_signal.extend_from_slice(&resampled[0]);
+
+                buffer.extend_from_slice(&mono_signal);
+                
+                // バッファが指定サイズに達したらリサンプリングして追加
+                if buffer.len() >= buffer_size {
+                    let resampled = resampler.process(&[buffer.clone()], None).unwrap();
+                    input_signal.extend_from_slice(&resampled[0]);
+                    buffer.clear(); // バッファをクリア
+                }
             },
             move |err| {
                 eprintln!("Error occurred on input stream: {}", err);
@@ -128,13 +129,9 @@ fn record_and_resample(hparams: &Hyperparameters) -> Vec<f32> {
         )
         .unwrap();
 
-    stream.play().unwrap();
-
-    std::thread::sleep(std::time::Duration::from_secs(5)); // 5秒間録音
-
-    let final_signal = signal.lock().unwrap().clone();
-    final_signal
+    stream
 }
+
 // ONNXモデルを推論する関数
 fn run_onnx_model(
     session: &ort::Session,
@@ -193,64 +190,78 @@ fn audio_trans(
 
     audio
 }
-fn save_wav(signal: Vec<f32>, file_path: &str, hparams: &Hyperparameters) {
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate: hparams.sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
 
-    let mut writer = hound::WavWriter::create(file_path, spec).unwrap();
-
-    for sample in signal {
-        let scaled_sample = (sample * hparams.max_wav_value) as i16; // スケーリングしてi16に変換
-        writer.write_sample(scaled_sample).unwrap();
-    }
-
-    writer.finalize().unwrap();
-}
-
-fn play_output(signal: Vec<f32>, hparams: &Hyperparameters) {
+// 音声をスピーカーに出力
+fn play_output(
+    hparams: Arc<Hyperparameters>,  // `Arc`で所有権を共有
+    session: Arc<ort::Session>,     // `Arc`で所有権を共有
+    input_signal: Arc<Mutex<Vec<f32>>>,
+    buffer_size: usize
+) -> cpal::Stream {
     let host = cpal::default_host();
     let output_device = host
         .default_output_device()
         .expect("Failed to get default output device.");
-    
+
     let output_config = output_device.default_output_config().unwrap();
-    
     let output_sample_rate = output_config.sample_rate().0;
-    
-    // リサンプラーの設定（マイク入力時のリサンプルとは逆に、モデルのサンプリングレートから出力デバイスのサンプリングレートにリサンプル）
+
+    // リサンプラーの設定（モデルのサンプリングレートから出力デバイスのサンプリングレートにリサンプル）
     let mut resampler = FftFixedInOut::<f32>::new(
         hparams.sample_rate as usize,
         output_sample_rate as usize,
-        100000,
+        512,
         1,
     )
     .unwrap();
 
-    // リサンプルされた音声信号
-    let resampled_signal = resampler.process(&[signal], None).unwrap();
-    let output_signal = resampled_signal[0].clone();
-
-    let channels = output_config.channels() as usize;
+    let output_signal = Arc::clone(&input_signal);
     let mut sample_index = 0;
+    let mut processed_signal_cache: Option<Vec<f32>> = None; // キャッシュを保持
+
+    // `output_config`のクローンを作成してから使用
+    let output_config_clone = output_config.clone();
+    let output_config_for_closure = output_config.clone(); // クロージャ内で使うためのクローン
 
     let stream = output_device
         .build_output_stream(
-            &output_config.into(),
+            &output_config_clone.into(), // ここで`into()`を呼び出して所有権を移動
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                for frame in data.chunks_mut(channels) {
-                    let sample = if sample_index < output_signal.len() {
-                        output_signal[sample_index]
-                    } else {
-                        0.0 // 信号が終わったら無音にする
-                    };
-                    for channel in frame.iter_mut() {
-                        *channel = sample;
+                let mut input_signal = output_signal.lock().unwrap();
+                if !input_signal.is_empty() {
+                    // キャッシュがない場合は新しい信号を処理
+                    if processed_signal_cache.is_none() {
+                        let processed_signal = audio_trans(
+                            &hparams,    // `Arc`で共有された所有権を渡す
+                            &session,    // `Arc`で共有された所有権を渡す
+                            input_signal.clone(),
+                            hparams.target_id
+                        );
+                        let resampled = resampler.process(&[processed_signal], None).unwrap();
+                        processed_signal_cache = Some(resampled[0].clone());
+                        input_signal.clear(); // 信号が処理された後にクリア
                     }
-                    sample_index += 1;
+
+                    let resampled_signal = processed_signal_cache.as_ref().unwrap();
+
+                    // クロージャ内で別クローンを使用
+                    for frame in data.chunks_mut(output_config_for_closure.channels() as usize) {
+                        let sample = if sample_index < resampled_signal.len() {
+                            resampled_signal[sample_index]
+                        } else {
+                            0.0 // 信号が終わったら無音にする
+                        };
+                        for channel in frame.iter_mut() {
+                            *channel = sample;
+                        }
+                        sample_index += 1;
+                    }
+
+                    // 全てのサンプルを再生し終わったらキャッシュをクリア
+                    if sample_index >= resampled_signal.len() {
+                        sample_index = 0;
+                        processed_signal_cache = None;
+                    }
                 }
             },
             move |err| {
@@ -260,35 +271,38 @@ fn play_output(signal: Vec<f32>, hparams: &Hyperparameters) {
         )
         .unwrap();
 
-    stream.play().unwrap();
-    std::thread::sleep(std::time::Duration::from_secs(5)); // 5秒間再生（音声長に応じて調整）
+    stream
 }
-fn main() {
-    let hparams = Hyperparameters::new();
 
-    let environment = Arc::new(
-        Environment::builder()
-            .with_name("MMVC_Client")
-            .build()
-            .unwrap(),
-    );
 
-    let session = SessionBuilder::new(&environment)
-        .unwrap()
-        .with_optimization_level(GraphOptimizationLevel::Level3)
-        .unwrap()
-        .with_model_from_file("G_best.onnx")
-        .unwrap();
+fn main() -> OrtResult<()> {
+    let hparams = Arc::new(Hyperparameters::new()); // `Arc`で共有する
 
-    // マイクから音声を取得してリサンプリング
-    let input_signal = record_and_resample(&hparams);
-    // 取得した信号をファイルに保存
-    save_wav(input_signal.clone(), "input_signal.wav", &hparams);
-    // 音声処理
-    let output_signal = audio_trans(&hparams, &session, input_signal, hparams.target_id);
+    // 環境の構築とCUDAプロバイダーの追加
+    let environment = Environment::builder()
+        .with_name("MMVC_Client")
+        .with_execution_providers([ExecutionProvider::CUDA(Default::default())]) // CUDAプロバイダーを追加
+        .build()?
+        .into_arc();
 
-    // 処理後の音声を出力デバイスに再生
-    save_wav(output_signal.clone(), "output_signal.wav", &hparams);
-    // 処理後の音声をスピーカーに出力
-    play_output(output_signal, &hparams);
+    // セッションの構築
+    let session = SessionBuilder::new(&environment)?
+        .with_optimization_level(GraphOptimizationLevel::Level3)?
+        .with_model_from_file("G_best.onnx")?;
+
+    let buffer_size = 4096; // 0.05秒程度のバッファサイズ
+    let input_signal = Arc::new(Mutex::new(Vec::new()));
+
+    // ストリームの作成
+    let input_stream = record_and_resample(&hparams, Arc::clone(&input_signal), buffer_size);
+    let output_stream = play_output(Arc::clone(&hparams), Arc::new(session), Arc::clone(&input_signal), buffer_size);
+
+    // ストリームの開始
+    input_stream.play().unwrap();
+    output_stream.play().unwrap();
+
+    // 永続ループで音声を処理し続ける
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(50)); // 50msごとに処理
+    }
 }
