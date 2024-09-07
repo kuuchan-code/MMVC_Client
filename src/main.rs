@@ -1,13 +1,12 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::StreamConfig;
 use ndarray::{Array1, Array3, CowArray};
+use ort::{Environment, ExecutionProvider, OrtResult, SessionBuilder};
 use ort::{GraphOptimizationLevel, Value};
 use rubato::{FftFixedInOut, Resampler};
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::f32::consts::PI;
 use std::sync::{Arc, Mutex};
-use ort::{Environment, ExecutionProvider, SessionBuilder, OrtResult};
-
 
 // ハイパーパラメータ構造体
 struct Hyperparameters {
@@ -41,30 +40,38 @@ fn pad_signal(signal: &mut Vec<f32>, filter_length: usize, hop_length: usize) {
     *signal = padded_signal;
 }
 
-// STFTを実行
-fn stft(signal: &Vec<f32>, hparams: &Hyperparameters) -> Array3<f32> {
-    let fft_size = hparams.filter_length;
-    let hop_size = hparams.hop_length;
-    let mut planner = FftPlanner::<f32>::new();
-    let fft = planner.plan_fft_forward(fft_size);
-
-    let num_frames = (signal.len() - fft_size) / hop_size + 1;
-    let mut spectrogram = Array3::<f32>::zeros((1, hparams.channels, num_frames));
-
-    let window: Vec<f32> = (0..fft_size)
-        .map(|n| 0.5 * (1.0 - (2.0 * PI * n as f32 / fft_size as f32).cos()))
+// STFTを実行し、ハンウィンドウを適用したスペクトログラムを生成
+fn stft_with_hann_window(
+    signal: &Vec<f32>,
+    n_fft: usize,
+    hop_size: usize,
+    win_size: usize,
+) -> Array3<f32> {
+    // ハンウィンドウを生成
+    let hann_window: Vec<f32> = (0..win_size)
+        .map(|n| 0.5 * (1.0 - (2.0 * PI * n as f32 / win_size as f32).cos()))
         .collect();
 
-    for (i, frame) in signal.windows(fft_size).step_by(hop_size).enumerate() {
+    // FFT プランナー
+    let mut planner = FftPlanner::<f32>::new();
+    let fft = planner.plan_fft_forward(n_fft);
+
+    let num_frames = (signal.len() - n_fft) / hop_size + 1;
+    let mut spectrogram = Array3::<f32>::zeros((1, n_fft / 2 + 1, num_frames));
+
+    for (i, frame) in signal.windows(n_fft).step_by(hop_size).enumerate() {
+        // フレームにハンウィンドウを適用
         let mut buffer: Vec<Complex<f32>> = frame
             .iter()
-            .zip(&window)
+            .zip(&hann_window)
             .map(|(x, w)| Complex::new(x * w, 0.0))
             .collect();
+
+        // FFTを実行
         fft.process(&mut buffer);
 
         // パワースペクトログラムを計算
-        for (j, bin) in buffer.iter().take(hparams.channels).enumerate() {
+        for (j, bin) in buffer.iter().take(n_fft / 2 + 1).enumerate() {
             let power = (bin.re.powi(2) + bin.im.powi(2)).sqrt();
             spectrogram[[0, j, i]] = power;
         }
@@ -77,7 +84,7 @@ fn stft(signal: &Vec<f32>, hparams: &Hyperparameters) -> Array3<f32> {
 fn record_and_resample(
     hparams: &Hyperparameters,
     signal: Arc<Mutex<Vec<f32>>>,
-    buffer_size: usize
+    buffer_size: usize,
 ) -> cpal::Stream {
     let host = cpal::default_host();
     let input_device = host
@@ -114,7 +121,7 @@ fn record_and_resample(
                     .collect();
 
                 buffer.extend_from_slice(&mono_signal);
-                
+
                 // バッファが指定サイズに達したらリサンプリングして追加
                 if buffer.len() >= buffer_size {
                     let resampled = resampler.process(&[buffer.clone()], None).unwrap();
@@ -175,8 +182,13 @@ fn audio_trans(
         hparams.hop_length,
     );
 
-    // STFTを実行してスペクトログラムを得る
-    let spec = stft(&padded_signal, hparams);
+    // ハンウィンドウを適用したSTFTを実行
+    let spec = stft_with_hann_window(
+        &padded_signal,
+        hparams.filter_length, // n_fft
+        hparams.hop_length,    // hop_size
+        hparams.filter_length, // win_size
+    );
 
     println!("spec shape: {:?}", spec.shape()); // 形状を確認
 
@@ -193,10 +205,10 @@ fn audio_trans(
 
 // 音声をスピーカーに出力
 fn play_output(
-    hparams: Arc<Hyperparameters>,  // `Arc`で所有権を共有
-    session: Arc<ort::Session>,     // `Arc`で所有権を共有
+    hparams: Arc<Hyperparameters>,
+    session: Arc<ort::Session>,
     input_signal: Arc<Mutex<Vec<f32>>>,
-    buffer_size: usize
+    buffer_size: usize,
 ) -> cpal::Stream {
     let host = cpal::default_host();
     let output_device = host
@@ -206,11 +218,10 @@ fn play_output(
     let output_config = output_device.default_output_config().unwrap();
     let output_sample_rate = output_config.sample_rate().0;
 
-    // リサンプラーの設定（モデルのサンプリングレートから出力デバイスのサンプリングレートにリサンプル）
     let mut resampler = FftFixedInOut::<f32>::new(
         hparams.sample_rate as usize,
         output_sample_rate as usize,
-        2048,
+        buffer_size / 2,
         1,
     )
     .unwrap();
@@ -218,38 +229,40 @@ fn play_output(
     let output_signal = Arc::clone(&input_signal);
     let mut sample_index = 0;
     let mut processed_signal_cache: Option<Vec<f32>> = None; // キャッシュを保持
+    let mut prev_trans_wav: Vec<f32> = Vec::new(); // 前回の音声データを保持
+    let overlap_length = hparams.filter_length / 2;
 
-    // `output_config`のクローンを作成してから使用
-    let output_config_clone = output_config.clone();
-    let output_config_for_closure = output_config.clone(); // クロージャ内で使うためのクローン
-
+    let output_config_clone = output_config.clone(); // クローンして再利用
     let stream = output_device
         .build_output_stream(
-            &output_config_clone.into(), // ここで`into()`を呼び出して所有権を移動
+            &output_config_clone.into(),
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 let mut input_signal = output_signal.lock().unwrap();
                 if !input_signal.is_empty() {
-                    // キャッシュがない場合は新しい信号を処理
                     if processed_signal_cache.is_none() {
                         let processed_signal = audio_trans(
-                            &hparams,    // `Arc`で共有された所有権を渡す
-                            &session,    // `Arc`で共有された所有権を渡す
+                            &hparams,
+                            &session,
                             input_signal.clone(),
-                            hparams.target_id
+                            hparams.target_id,
                         );
                         let resampled = resampler.process(&[processed_signal], None).unwrap();
-                        processed_signal_cache = Some(resampled[0].clone());
-                        input_signal.clear(); // 信号が処理された後にクリア
+
+                        // オーバーラップ合成
+                        let merged_signal =
+                            overlap_merge(&resampled[0], &prev_trans_wav, overlap_length);
+                        processed_signal_cache = Some(merged_signal.clone());
+                        prev_trans_wav = resampled[0].clone(); // 次回のために保存
+                        input_signal.clear();
                     }
 
                     let resampled_signal = processed_signal_cache.as_ref().unwrap();
 
-                    // クロージャ内で別クローンを使用
-                    for frame in data.chunks_mut(output_config_for_closure.channels() as usize) {
+                    for frame in data.chunks_mut(output_config.channels() as usize) {
                         let sample = if sample_index < resampled_signal.len() {
                             resampled_signal[sample_index]
                         } else {
-                            0.0 // 信号が終わったら無音にする
+                            0.0
                         };
                         for channel in frame.iter_mut() {
                             *channel = sample;
@@ -257,7 +270,6 @@ fn play_output(
                         sample_index += 1;
                     }
 
-                    // 全てのサンプルを再生し終わったらキャッシュをクリア
                     if sample_index >= resampled_signal.len() {
                         sample_index = 0;
                         processed_signal_cache = None;
@@ -267,11 +279,37 @@ fn play_output(
             move |err| {
                 eprintln!("Error occurred on output stream: {}", err);
             },
-            None
+            None,
         )
         .unwrap();
 
     stream
+}
+
+fn overlap_merge(now_wav: &Vec<f32>, prev_wav: &Vec<f32>, overlap_length: usize) -> Vec<f32> {
+    if overlap_length == 0 || prev_wav.is_empty() {
+        return now_wav.clone();
+    }
+
+    let overlap_len = std::cmp::min(overlap_length, std::cmp::min(now_wav.len(), prev_wav.len()));
+    let now_head = &now_wav[..overlap_len];
+    let prev_tail = &prev_wav[prev_wav.len() - overlap_len..];
+
+    let gradation: Vec<f32> = (0..overlap_len)
+        .map(|i| (i as f32 / overlap_len as f32) * PI * 0.5)
+        .collect();
+
+    let mut merged: Vec<f32> = Vec::with_capacity(now_wav.len());
+
+    for i in 0..overlap_len {
+        let cos_grad = gradation[i].cos().powi(2);
+        let prev_cos_grad = (PI * 0.5 - gradation[i]).cos().powi(2);
+        let merged_sample = prev_tail[i] * prev_cos_grad + now_head[i] * cos_grad;
+        merged.push(merged_sample);
+    }
+
+    merged.extend_from_slice(&now_wav[overlap_len..]);
+    merged
 }
 
 
@@ -290,12 +328,17 @@ fn main() -> OrtResult<()> {
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         .with_model_from_file("G_best.onnx")?;
 
-    let buffer_size = 4096; // 0.05秒程度のバッファサイズ
+    let buffer_size = 8192;
     let input_signal = Arc::new(Mutex::new(Vec::new()));
 
     // ストリームの作成
     let input_stream = record_and_resample(&hparams, Arc::clone(&input_signal), buffer_size);
-    let output_stream = play_output(Arc::clone(&hparams), Arc::new(session), Arc::clone(&input_signal), buffer_size);
+    let output_stream = play_output(
+        Arc::clone(&hparams),
+        Arc::new(session),
+        Arc::clone(&input_signal),
+        buffer_size,
+    );
 
     // ストリームの開始
     input_stream.play().unwrap();
