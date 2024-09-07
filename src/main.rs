@@ -1,6 +1,6 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::StreamConfig;
-use ndarray::{Array1, Array3, CowArray};
+use ndarray::{s, Array1, Array3, CowArray};
 use ort::{Environment, ExecutionProvider, OrtResult, SessionBuilder};
 use ort::{GraphOptimizationLevel, Value};
 use rubato::{FftFixedInOut, Resampler};
@@ -14,8 +14,10 @@ struct Hyperparameters {
     max_wav_value: f32,
     filter_length: usize, // FFTのウィンドウサイズ
     hop_length: usize,
-    channels: usize, // 257
-    target_id: i64,  // target_id フィールドを追加
+    channels: usize,             // 257
+    target_id: i64,              // target_id フィールドを追加
+    dispose_stft_specs: usize,   // STFT の dispose フィールド
+    dispose_conv1d_specs: usize, // Conv1D の dispose フィールド
 }
 
 impl Hyperparameters {
@@ -23,10 +25,12 @@ impl Hyperparameters {
         Hyperparameters {
             sample_rate: 24000,
             max_wav_value: 32768.0,
-            filter_length: 512, // Pythonコードに基づく
+            filter_length: 512,
             hop_length: 128,
-            channels: 257, // モデルのチャネル数（257）
-            target_id: 2,  // 任意の話者ID
+            channels: 257,
+            target_id: 2,
+            dispose_stft_specs: 2,
+            dispose_conv1d_specs: 10,
         }
     }
 }
@@ -129,6 +133,24 @@ fn record_and_resample(
 
     stream
 }
+fn dispose_stft_padding(spec: &mut Array3<f32>, dispose_stft_specs: usize) {
+    let spec_len = spec.shape()[2];
+    if dispose_stft_specs > 0 && spec_len > 2 * dispose_stft_specs {
+        *spec = spec
+            .slice(s![
+                ..,
+                ..,
+                dispose_stft_specs..spec_len - dispose_stft_specs
+            ])
+            .to_owned();
+    }
+}
+fn dispose_conv1d_padding(audio: &mut Vec<f32>, dispose_conv1d_length: usize) {
+    let audio_len = audio.len();
+    if dispose_conv1d_length > 0 && audio_len > 2 * dispose_conv1d_length {
+        *audio = audio[dispose_conv1d_length..audio_len - dispose_conv1d_length].to_vec();
+    }
+}
 
 // ONNXモデルを推論する関数
 fn run_onnx_model(
@@ -165,17 +187,21 @@ fn audio_trans(
     session: &ort::Session,
     signal: Vec<f32>,
     target_id: i64,
+    dispose_stft_specs: usize,   // dispose_stft_specs 引数を追加
+    dispose_conv1d_specs: usize, // dispose_conv1d_specs 引数を追加
 ) -> Vec<f32> {
-
     // ハンウィンドウを適用したSTFTを実行
-    let spec = stft_with_hann_window(
+    let mut spec = stft_with_hann_window(
         &signal,
         hparams.filter_length, // n_fft
         hparams.hop_length,    // hop_size
         hparams.filter_length, // win_size
     );
 
-    println!("spec shape: {:?}", spec.shape()); // 形状を確認
+    // STFT パディング削除
+    dispose_stft_padding(&mut spec, dispose_stft_specs); // dispose_stft_specs を適用
+
+    println!("spec shape after dispose: {:?}", spec.shape());
 
     // spec_lengthsを1次元に修正
     let spec_lengths = Array1::from_elem(1, spec.shape()[2] as i64); // 1次元配列
@@ -183,7 +209,10 @@ fn audio_trans(
     let sid_target = hparams.target_id; // 既存のターゲットID
 
     // モデルの実行
-    let audio = run_onnx_model(session, &spec, &spec_lengths, &sid_src, sid_target);
+    let mut audio = run_onnx_model(session, &spec, &spec_lengths, &sid_src, sid_target);
+
+    // Conv1D パディング削除
+    dispose_conv1d_padding(&mut audio, dispose_conv1d_specs); // dispose_conv1d_specs を適用
 
     audio
 }
@@ -206,7 +235,8 @@ fn play_output(
     let mut resampler = FftFixedInOut::<f32>::new(
         hparams.sample_rate as usize,
         output_sample_rate as usize,
-        buffer_size / 2 - hparams.filter_length + hparams.hop_length,
+        buffer_size / 2 - 2 * hparams.filter_length + hparams.hop_length
+            - hparams.dispose_conv1d_specs * hparams.dispose_stft_specs,
         1,
     )
     .unwrap();
@@ -215,7 +245,7 @@ fn play_output(
     let mut sample_index = 0;
     let mut processed_signal_cache: Option<Vec<f32>> = None; // キャッシュを保持
     let mut prev_trans_wav: Vec<f32> = Vec::new(); // 前回の音声データを保持
-    let overlap_length = hparams.filter_length / 2;
+    let overlap_length = hparams.filter_length * 2;
 
     let output_config_clone = output_config.clone(); // クローンして再利用
     let stream = output_device
@@ -230,6 +260,8 @@ fn play_output(
                             &session,
                             input_signal.clone(),
                             hparams.target_id,
+                            hparams.dispose_stft_specs, // STFT の dispose 値を渡す
+                            hparams.dispose_conv1d_specs, // Conv1D の dispose 値を渡す
                         );
                         let resampled = resampler.process(&[processed_signal], None).unwrap();
 
@@ -297,7 +329,6 @@ fn overlap_merge(now_wav: &Vec<f32>, prev_wav: &Vec<f32>, overlap_length: usize)
     merged
 }
 
-
 fn main() -> OrtResult<()> {
     let hparams = Arc::new(Hyperparameters::new()); // `Arc`で共有する
 
@@ -313,7 +344,7 @@ fn main() -> OrtResult<()> {
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         .with_model_from_file("G_best.onnx")?;
 
-    let buffer_size = 8192;
+    let buffer_size = 4096;
     let input_signal = Arc::new(Mutex::new(Vec::new()));
 
     // ストリームの作成
