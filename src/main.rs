@@ -218,7 +218,23 @@ fn audio_trans(
 
     audio
 }
-
+fn save_wav(signal: Vec<f32>, file_path: &str, hparams: &Hyperparameters) {
+    let spec = hound::WavSpec {
+        channels: 1,
+        sample_rate: hparams.sample_rate,
+        bits_per_sample: 16,
+        sample_format: hound::SampleFormat::Int,
+    };
+    
+    let mut writer = hound::WavWriter::create(file_path, spec).unwrap();
+    
+    for sample in signal {
+        let scaled_sample = (sample * hparams.max_wav_value) as i16; // スケーリングしてi16に変換
+        writer.write_sample(scaled_sample).unwrap();
+    }
+    
+    writer.finalize().unwrap();
+}
 // メイン関数
 fn main() {
     let hparams = Hyperparameters::new();
@@ -239,10 +255,11 @@ fn main() {
     
     // マイクから音声を取得してリサンプリング
     let input_signal = record_and_resample(&hparams);
-    
+    // 取得した信号をファイルに保存
+    save_wav(input_signal.clone(), "input_signal.wav", &hparams);
     // 音声処理
     let output_signal = audio_trans(&hparams, &session, input_signal, hparams.target_id);
     
     // 処理後の音声を出力デバイスに再生
-    play_output(output_signal, &hparams);
+    save_wav(output_signal.clone(), "output_signal.wav", &hparams);
 }
