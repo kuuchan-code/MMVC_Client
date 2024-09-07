@@ -129,10 +129,11 @@ fn audio_trans(
 
     // spec_lengthsを1次元に修正
     let spec_lengths = Array1::from_elem(1, spec.shape()[2] as i64); // 1次元配列
-    let sid_src = Array1::from_elem(1, hparams.target_id); // 1次元配列
+    let sid_src = Array1::from_elem(1, 0); // `sid_src`を0に設定、1次元配列
+    let sid_target = hparams.target_id; // 既存のターゲットID
 
     // モデルの実行
-    let audio = run_onnx_model(session, &spec, &spec_lengths, &sid_src, target_id);
+    let audio = run_onnx_model(session, &spec, &spec_lengths, &sid_src, sid_target);
 
     audio
 }
