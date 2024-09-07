@@ -31,15 +31,6 @@ impl Hyperparameters {
     }
 }
 
-// 音声信号にパディングを追加
-fn pad_signal(signal: &mut Vec<f32>, filter_length: usize, hop_length: usize) {
-    let pad_size = (filter_length - hop_length) / 2;
-    let mut padded_signal = vec![0.0; pad_size];
-    padded_signal.extend(signal.iter());
-    padded_signal.extend(vec![0.0; pad_size]);
-    *signal = padded_signal;
-}
-
 // STFTを実行し、ハンウィンドウを適用したスペクトログラムを生成
 fn stft_with_hann_window(
     signal: &Vec<f32>,
@@ -175,16 +166,10 @@ fn audio_trans(
     signal: Vec<f32>,
     target_id: i64,
 ) -> Vec<f32> {
-    let mut padded_signal = signal.clone();
-    pad_signal(
-        &mut padded_signal,
-        hparams.filter_length,
-        hparams.hop_length,
-    );
 
     // ハンウィンドウを適用したSTFTを実行
     let spec = stft_with_hann_window(
-        &padded_signal,
+        &signal,
         hparams.filter_length, // n_fft
         hparams.hop_length,    // hop_size
         hparams.filter_length, // win_size
@@ -221,7 +206,7 @@ fn play_output(
     let mut resampler = FftFixedInOut::<f32>::new(
         hparams.sample_rate as usize,
         output_sample_rate as usize,
-        buffer_size / 2,
+        buffer_size / 2 - hparams.filter_length + hparams.hop_length,
         1,
     )
     .unwrap();
