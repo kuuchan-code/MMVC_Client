@@ -97,7 +97,7 @@ fn record_and_resample(hparams: &Hyperparameters) -> Vec<f32> {
     let input_sample_rate = input_config.sample_rate().0;
     
     // リサンプラーの設定
-    let mut resampler = FftFixedInOut::<f32>::new(input_sample_rate as usize, hparams.sample_rate as usize, 1024, 1).unwrap();
+    let mut resampler = FftFixedInOut::<f32>::new(input_sample_rate as usize, hparams.sample_rate as usize, 480, 1).unwrap();
     let signal = Arc::new(Mutex::new(Vec::new()));
     
     let signal_clone = Arc::clone(&signal);
@@ -139,7 +139,7 @@ fn play_output(output_signal: Vec<f32>, hparams: &Hyperparameters) {
     let output_sample_rate = output_config.sample_rate().0;
     
     // 出力リサンプラー
-    let mut resampler = FftFixedInOut::<f32>::new(hparams.sample_rate as usize, output_sample_rate as usize, 1024, 2).unwrap();
+    let mut resampler = FftFixedInOut::<f32>::new(hparams.sample_rate as usize, output_sample_rate as usize, 480, 1).unwrap();
     
     let resampled_signal = resampler.process(&[output_signal], None).unwrap();
     let output_stream_config: StreamConfig = output_config.into(); // 変換
