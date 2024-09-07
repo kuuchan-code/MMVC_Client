@@ -1,5 +1,5 @@
 use hound;
-use ndarray::Array1, Array3, CowArray};
+use ndarray::{Array1, Array3, CowArray};
 use ort::{Environment, GraphOptimizationLevel, SessionBuilder, Value};
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::f32::consts::PI;
