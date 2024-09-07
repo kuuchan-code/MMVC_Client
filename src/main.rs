@@ -3,7 +3,10 @@ use ndarray::{Array1, Array3, CowArray};
 use ort::{Environment, GraphOptimizationLevel, SessionBuilder, Value};
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::f32::consts::PI;
-use std::sync::Arc; // WAVファイル処理用
+use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use cpal::{SampleRate, StreamConfig};
+use rubato::{FftFixedInOut, Resampler};
+use std::sync::{Arc, Mutex};
 
 // ハイパーパラメータ構造体
 struct Hyperparameters {
@@ -79,6 +82,84 @@ fn stft(signal: &Vec<f32>, hparams: &Hyperparameters) -> Array3<f32> {
 
     spectrogram
 }
+
+// マイク入力から音声を取得しリサンプリングする関数
+fn record_and_resample(hparams: &Hyperparameters) -> Vec<f32> {
+    let host = cpal::default_host();
+    let input_device = host
+        .default_input_device()
+        .expect("Failed to get default input device.");
+    
+        let input_config = input_device.default_input_config().unwrap();
+    
+    // モノラルに変換し、必要なサンプルレートにリサンプリング
+    let channels = input_config.channels();
+    let input_sample_rate = input_config.sample_rate().0;
+    
+    // リサンプラーの設定
+    let mut resampler = FftFixedInOut::<f32>::new(input_sample_rate as usize, hparams.sample_rate as usize, 1024, 1).unwrap();
+    let signal = Arc::new(Mutex::new(Vec::new()));
+    
+    let signal_clone = Arc::clone(&signal);
+    let input_stream_config: StreamConfig = input_config.into(); // 変換
+
+    let stream = input_device.build_input_stream(
+        &input_stream_config,
+        move |data: &[f32], _: &cpal::InputCallbackInfo| {
+            let mut input_signal = signal_clone.lock().unwrap();
+            let mono_signal: Vec<f32> = data
+                .chunks(channels as usize)
+                .map(|chunk| chunk.iter().sum::<f32>() / channels as f32)
+                .collect();
+            let resampled = resampler.process(&[mono_signal], None).unwrap();
+            input_signal.extend_from_slice(&resampled[0]);
+        },
+        move |err| {
+            eprintln!("Error occurred on input stream: {}", err);
+        },
+        None, // ここでOption<Duration>を指定
+    ).unwrap();
+    
+    
+    stream.play().unwrap();
+    
+    std::thread::sleep(std::time::Duration::from_secs(5)); // 5秒間録音
+    
+    let final_signal = signal.lock().unwrap().clone();
+    final_signal
+}
+// 処理結果を出力デバイスに送る関数
+fn play_output(output_signal: Vec<f32>, hparams: &Hyperparameters) {
+    let host = cpal::default_host();
+    let output_device = host
+        .default_output_device()
+        .expect("Failed to get default output device.");
+    
+    let output_config = output_device.default_output_config().unwrap();
+    let output_sample_rate = output_config.sample_rate().0;
+    
+    // 出力リサンプラー
+    let mut resampler = FftFixedInOut::<f32>::new(hparams.sample_rate as usize, output_sample_rate as usize, 1024, 2).unwrap();
+    
+    let resampled_signal = resampler.process(&[output_signal], None).unwrap();
+    let output_stream_config: StreamConfig = output_config.into(); // 変換
+
+    let stream = output_device.build_output_stream(
+        &output_stream_config,
+        move |output: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            let output_length = output.len().min(resampled_signal[0].len());
+            output[..output_length].copy_from_slice(&resampled_signal[0][..output_length]);
+        },
+        move |err| {
+            eprintln!("Error occurred on output stream: {}", err);
+        },
+        None, // ここでOption<Duration>を指定
+    ).unwrap();
+    
+    stream.play().unwrap();
+    
+    std::thread::sleep(std::time::Duration::from_secs(5)); // 出力を5秒間再生
+}
 // ONNXモデルを推論する関数
 fn run_onnx_model(
     session: &ort::Session,
@@ -140,41 +221,28 @@ fn audio_trans(
 
 // メイン関数
 fn main() {
-    // ハイパーパラメータの初期化
     let hparams = Hyperparameters::new();
-
-    // ONNX環境とセッションの初期化
+    
     let environment = Arc::new(
         Environment::builder()
             .with_name("MMVC_Client")
             .build()
             .unwrap(),
     );
-
+    
     let session = SessionBuilder::new(&environment)
-        .unwrap() // SessionBuilder を取得
-        .with_optimization_level(GraphOptimizationLevel::Level3) // Optimization Level を Level3 に
-        .unwrap() // Optimization Level の設定後に unwrap
-        .with_model_from_file("G_best.onnx") // モデルのロード
+        .unwrap()
+        .with_optimization_level(GraphOptimizationLevel::Level3)
+        .unwrap()
+        .with_model_from_file("G_best.onnx")
         .unwrap();
-
-    // WAVファイルを読み込み
-    let input_wav = load_wav("emotion001.wav");
-
-    // 音声処理を実行
-    let output_wav = audio_trans(&hparams, &session, input_wav, hparams.target_id);
-
-    // 処理結果をファイルに保存
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate: hparams.sample_rate,
-        bits_per_sample: 16,
-        sample_format: hound::SampleFormat::Int,
-    };
-    let mut writer = hound::WavWriter::create("output.wav", spec).unwrap();
-    for sample in output_wav {
-        writer
-            .write_sample((sample * hparams.max_wav_value) as i16)
-            .unwrap();
-    }
+    
+    // マイクから音声を取得してリサンプリング
+    let input_signal = record_and_resample(&hparams);
+    
+    // 音声処理
+    let output_signal = audio_trans(&hparams, &session, input_signal, hparams.target_id);
+    
+    // 処理後の音声を出力デバイスに再生
+    play_output(output_signal, &hparams);
 }
