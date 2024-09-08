@@ -47,14 +47,17 @@ fn stft_with_hann_window(
         .map(|n| 0.5 * (1.0 - (2.0 * PI * n as f32 / win_size as f32).cos()))
         .collect();
 
+    // 信号をパディング
+    let padded_signal = pad_signal(signal, n_fft, hop_size);
+
     // FFT プランナー
     let mut planner = FftPlanner::<f32>::new();
     let fft = planner.plan_fft_forward(n_fft);
 
-    let num_frames = (signal.len() - n_fft) / hop_size + 1;
+    let num_frames = (padded_signal.len() - n_fft) / hop_size + 1;
     let mut spectrogram = Array3::<f32>::zeros((1, n_fft / 2 + 1, num_frames));
 
-    for (i, frame) in signal.windows(n_fft).step_by(hop_size).enumerate() {
+    for (i, frame) in padded_signal.windows(n_fft).step_by(hop_size).enumerate() {
         // フレームにハンウィンドウを適用
         let mut buffer: Vec<Complex<f32>> = frame
             .iter()
@@ -133,7 +136,13 @@ fn record_and_resample(
 
     stream
 }
-
+fn pad_signal(signal: &Vec<f32>, n_fft: usize, hop_size: usize) -> Vec<f32> {
+    let pad_size = (n_fft - hop_size) / 2;
+    let mut padded_signal = vec![0.0; pad_size]; // 左側のパディングを追加
+    padded_signal.extend_from_slice(signal);
+    padded_signal.extend(vec![0.0; pad_size]); // 右側のパディングを追加
+    padded_signal
+}
 fn dispose_stft_padding(spec: &mut Array3<f32>, dispose_stft_specs: usize) {
     let spec_len = spec.shape()[2];
     if dispose_stft_specs > 0 && spec_len > 2 * dispose_stft_specs {
