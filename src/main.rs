@@ -133,6 +133,7 @@ fn record_and_resample(
 
     stream
 }
+
 fn dispose_stft_padding(spec: &mut Array3<f32>, dispose_stft_specs: usize) {
     let spec_len = spec.shape()[2];
     if dispose_stft_specs > 0 && spec_len > 2 * dispose_stft_specs {
@@ -145,6 +146,7 @@ fn dispose_stft_padding(spec: &mut Array3<f32>, dispose_stft_specs: usize) {
             .to_owned();
     }
 }
+
 fn dispose_conv1d_padding(audio: &mut Vec<f32>, dispose_conv1d_length: usize) {
     let audio_len = audio.len();
     if dispose_conv1d_length > 0 && audio_len > 2 * dispose_conv1d_length {
