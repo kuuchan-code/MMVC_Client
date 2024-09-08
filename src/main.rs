@@ -245,7 +245,7 @@ fn play_output(
     let mut sample_index = 0;
     let mut processed_signal_cache: Option<Vec<f32>> = None; // キャッシュを保持
     let mut prev_trans_wav: Vec<f32> = Vec::new(); // 前回の音声データを保持
-    let overlap_length = hparams.filter_length * 2;
+    let overlap_length = 128;
 
     let output_config_clone = output_config.clone(); // クローンして再利用
     let stream = output_device
@@ -335,7 +335,7 @@ fn main() -> OrtResult<()> {
     // 環境の構築とCUDAプロバイダーの追加
     let environment = Environment::builder()
         .with_name("MMVC_Client")
-        .with_execution_providers([ExecutionProvider::CUDA(Default::default())]) // CUDAプロバイダーを追加
+        .with_execution_providers([ExecutionProvider::DirectML(Default::default())]) // CUDAプロバイダーを追加
         .build()?
         .into_arc();
 
@@ -344,7 +344,7 @@ fn main() -> OrtResult<()> {
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         .with_model_from_file("G_best.onnx")?;
 
-    let buffer_size = 4096;
+    let buffer_size = 8192;
     let input_signal = Arc::new(Mutex::new(Vec::new()));
 
     // ストリームの作成
