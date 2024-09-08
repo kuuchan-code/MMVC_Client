@@ -77,64 +77,6 @@ fn apply_stft_with_hann_window(
     spectrogram
 }
 
-// マイク入力から音声を取得しリサンプリングする関数
-fn record_and_resample(
-    hparams: &AudioParams,
-    signal: Arc<Mutex<Vec<f32>>>,
-    buffer_size: usize,
-) -> cpal::Stream {
-    let host = cpal::default_host();
-    let input_device = host
-        .default_input_device()
-        .expect("Failed to get default input device.");
-
-    let input_config = input_device.default_input_config().unwrap();
-
-    // モノラルに変換し、必要なサンプルレートにリサンプリング
-    let frequency_bins = input_config.channels();
-    let input_sample_rate = input_config.sample_rate().0;
-
-    // リサンプラーの設定
-    let mut resampler = FftFixedInOut::<f32>::new(
-        input_sample_rate as usize,
-        hparams.sample_rate as usize,
-        buffer_size,
-        1,
-    )
-    .unwrap();
-
-    let input_stream_config: StreamConfig = input_config.into(); // 変換
-
-    let mut buffer = Vec::new();
-
-    let stream = input_device
-        .build_input_stream(
-            &input_stream_config,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                let mut input_signal = signal.lock().unwrap();
-                let mono_signal: Vec<f32> = data
-                    .chunks(frequency_bins as usize)
-                    .map(|chunk| chunk.iter().sum::<f32>() / frequency_bins as f32)
-                    .collect();
-
-                buffer.extend_from_slice(&mono_signal);
-
-                // バッファが指定サイズに達したらリサンプリングして追加
-                if buffer.len() >= buffer_size {
-                    let resampled = resampler.process(&[buffer.clone()], None).unwrap();
-                    input_signal.extend_from_slice(&resampled[0]);
-                    buffer.clear(); // バッファをクリア
-                }
-            },
-            move |err| {
-                eprintln!("Error occurred on input stream: {}", err);
-            },
-            None, // ここでOption<Duration>を指定
-        )
-        .unwrap();
-
-    stream
-}
 // オーディオ信号にパディングを追加
 fn pad_audio_signal(signal: &Vec<f32>, fft_size: usize, hop_size: usize) -> Vec<f32> {
     let pad_size = (fft_size - hop_size) / 2;
@@ -225,18 +167,68 @@ fn audio_trans(
     audio
 }
 
-// 音声をスピーカーに出力
+// マイク入力から音声を取得しリサンプリングする関数（デバイス選択対応）
+fn record_and_resample(
+    hparams: &AudioParams,
+    input_device: cpal::Device,
+    signal: Arc<Mutex<Vec<f32>>>,
+    buffer_size: usize,
+) -> cpal::Stream {
+    let input_config = input_device.default_input_config().unwrap();
+
+    let frequency_bins = input_config.channels();
+    let input_sample_rate = input_config.sample_rate().0;
+
+    // リサンプラーの設定
+    let mut resampler = FftFixedInOut::<f32>::new(
+        input_sample_rate as usize,
+        hparams.sample_rate as usize,
+        buffer_size,
+        1,
+    )
+    .unwrap();
+
+    let input_stream_config: StreamConfig = input_config.into(); // 変換
+
+    let mut buffer = Vec::new();
+
+    let stream = input_device
+        .build_input_stream(
+            &input_stream_config,
+            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                let mut input_signal = signal.lock().unwrap();
+                let mono_signal: Vec<f32> = data
+                    .chunks(frequency_bins as usize)
+                    .map(|chunk| chunk.iter().sum::<f32>() / frequency_bins as f32)
+                    .collect();
+
+                buffer.extend_from_slice(&mono_signal);
+
+                // バッファが指定サイズに達したらリサンプリングして追加
+                if buffer.len() >= buffer_size {
+                    let resampled = resampler.process(&[buffer.clone()], None).unwrap();
+                    input_signal.extend_from_slice(&resampled[0]);
+                    buffer.clear(); // バッファをクリア
+                }
+            },
+            move |err| {
+                eprintln!("Error occurred on input stream: {}", err);
+            },
+            None,
+        )
+        .unwrap();
+
+    stream
+}
+
+// 音声をスピーカーに出力（デバイス選択対応）
 fn play_output(
     hparams: Arc<AudioParams>,
     session: Arc<ort::Session>,
+    output_device: cpal::Device,
     input_signal: Arc<Mutex<Vec<f32>>>,
     buffer_size: usize,
 ) -> cpal::Stream {
-    let host = cpal::default_host();
-    let output_device = host
-        .default_output_device()
-        .expect("Failed to get default output device.");
-
     let output_config = output_device.default_output_config().unwrap();
     let output_sample_rate = output_config.sample_rate().0;
 
@@ -336,7 +328,17 @@ fn overlap_merge(now_wav: &Vec<f32>, prev_wav: &Vec<f32>, overlap_length: usize)
     merged.extend_from_slice(&now_wav[overlap_len..]);
     merged
 }
-
+// デバイス選択用の関数
+fn select_device(devices: Vec<cpal::Device>, label: &str) -> cpal::Device {
+    println!("{} デバイスを選択してください:", label);
+    for (i, device) in devices.iter().enumerate() {
+        println!("{}: {}", i, device.name().unwrap());
+    }
+    let mut input = String::new();
+    std::io::stdin().read_line(&mut input).unwrap();
+    let index: usize = input.trim().parse().unwrap();
+    devices.into_iter().nth(index).unwrap()
+}
 fn main() -> OrtResult<()> {
     let hparams = Arc::new(AudioParams::new()); // `Arc`で共有する
 
@@ -355,11 +357,22 @@ fn main() -> OrtResult<()> {
     let buffer_size = 8192;
     let input_signal = Arc::new(Mutex::new(Vec::new()));
 
+    // デバイス選択
+    let host = cpal::default_host();
+    let input_device = select_device(host.input_devices().unwrap().collect(), "入力");
+    let output_device = select_device(host.output_devices().unwrap().collect(), "出力");
+
     // ストリームの作成
-    let input_stream = record_and_resample(&hparams, Arc::clone(&input_signal), buffer_size);
+    let input_stream = record_and_resample(
+        &hparams,
+        input_device,
+        Arc::clone(&input_signal),
+        buffer_size,
+    );
     let output_stream = play_output(
         Arc::clone(&hparams),
         Arc::new(session),
+        output_device,
         Arc::clone(&input_signal),
         buffer_size,
     );
