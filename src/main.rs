@@ -245,7 +245,7 @@ fn play_output(
     let mut sample_index = 0;
     let mut processed_signal_cache: Option<Vec<f32>> = None; // キャッシュを保持
     let mut prev_trans_wav: Vec<f32> = Vec::new(); // 前回の音声データを保持
-    let overlap_length = 128;
+    let overlap_length = hparams.filter_length / 2;
 
     let output_config_clone = output_config.clone(); // クローンして再利用
     let stream = output_device
