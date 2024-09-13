@@ -1,12 +1,15 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::StreamConfig;
+use crossbeam_channel::{bounded, Receiver, Sender};
 use ndarray::{s, Array1, Array3, CowArray};
-use ort::{Environment, ExecutionProvider, OrtResult, SessionBuilder};
-use ort::{GraphOptimizationLevel, Value};
+use ort::{
+    Environment, ExecutionProvider, GraphOptimizationLevel, OrtResult, SessionBuilder, Value,
+};
 use rubato::{FftFixedInOut, Resampler};
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::f32::consts::PI;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::thread;
 
 // ハイパーパラメータ構造体
 struct AudioParams {
@@ -136,7 +139,7 @@ fn audio_trans(
     hparams: &AudioParams,
     session: &ort::Session,
     signal: Vec<f32>,
-    target_speaker_id: i64,
+    _target_speaker_id: i64,
     stft_padding_frames: usize,   // stft_padding_frames 引数を追加
     conv1d_padding_frames: usize, // conv1d_padding_frames 引数を追加
 ) -> Vec<f32> {
@@ -171,7 +174,7 @@ fn audio_trans(
 fn record_and_resample(
     hparams: &AudioParams,
     input_device: cpal::Device,
-    signal: Arc<Mutex<Vec<f32>>>,
+    input_tx: Sender<Vec<f32>>,
     buffer_size: usize,
 ) -> cpal::Stream {
     let input_config = input_device.default_input_config().unwrap();
@@ -188,7 +191,7 @@ fn record_and_resample(
     )
     .unwrap();
 
-    let input_stream_config: StreamConfig = input_config.into(); // 変換
+    let input_stream_config: StreamConfig = input_config.into();
 
     let mut buffer = Vec::new();
 
@@ -196,7 +199,6 @@ fn record_and_resample(
         .build_input_stream(
             &input_stream_config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                let mut input_signal = signal.lock().unwrap();
                 let mono_signal: Vec<f32> = data
                     .chunks(frequency_bins as usize)
                     .map(|chunk| chunk.iter().sum::<f32>() / frequency_bins as f32)
@@ -204,11 +206,13 @@ fn record_and_resample(
 
                 buffer.extend_from_slice(&mono_signal);
 
-                // バッファが指定サイズに達したらリサンプリングして追加
+                // バッファが指定サイズに達したらリサンプリングして送信
                 if buffer.len() >= buffer_size {
                     let resampled = resampler.process(&[buffer.clone()], None).unwrap();
-                    input_signal.extend_from_slice(&resampled[0]);
-                    buffer.clear(); // バッファをクリア
+                    if let Err(err) = input_tx.send(resampled[0].clone()) {
+                        eprintln!("Failed to send input data: {}", err);
+                    }
+                    buffer.clear();
                 }
             },
             move |err| {
@@ -220,13 +224,50 @@ fn record_and_resample(
 
     stream
 }
-
-// 音声をスピーカーに出力（デバイス選択対応）
-fn play_output(
+fn processing_thread(
     hparams: Arc<AudioParams>,
     session: Arc<ort::Session>,
+    input_rx: Receiver<Vec<f32>>,
+    output_tx: Sender<Vec<f32>>,
+) {
+    // SOLAのパラメータ設定
+    let sola_search_frame = 128;
+    let overlap_size = sola_search_frame * 2;
+    let mut sola = Sola::new(overlap_size, sola_search_frame);
+
+    loop {
+        match input_rx.recv() {
+            Ok(input_signal) => {
+                // 音声変換処理
+                let processed_signal = audio_trans(
+                    &hparams,
+                    &session,
+                    input_signal,
+                    hparams.target_speaker_id,
+                    hparams.stft_padding_frames,
+                    hparams.conv1d_padding_frames,
+                );
+
+                // SOLAによるマージ
+                let merged_signal = sola.merge(&processed_signal);
+
+                // マージした信号を送信
+                if let Err(err) = output_tx.send(merged_signal) {
+                    eprintln!("Failed to send output data: {}", err);
+                }
+            }
+            Err(err) => {
+                eprintln!("Failed to receive input data: {}", err);
+                break;
+            }
+        }
+    }
+}
+
+fn play_output(
+    hparams: &AudioParams,
     output_device: cpal::Device,
-    input_signal: Arc<Mutex<Vec<f32>>>,
+    output_rx: Receiver<Vec<f32>>,
     buffer_size: usize,
 ) -> cpal::Stream {
     let output_config = output_device.default_output_config().unwrap();
@@ -241,56 +282,41 @@ fn play_output(
     )
     .unwrap();
 
-    let output_signal = Arc::clone(&input_signal);
+    let mut output_buffer: Vec<f32> = Vec::new();
     let mut sample_index = 0;
-    let mut processed_signal_cache: Option<Vec<f32>> = None; // キャッシュを保持
-    let mut prev_trans_wav: Vec<f32> = Vec::new(); // 前回の音声データを保持
-    let overlap_length = hparams.fft_window_size / 2;
 
-    let output_config_clone = output_config.clone(); // クローンして再利用
+    // Use config() to get a reference to StreamConfig and clone it
+    let output_stream_config = output_config.config().clone();
+
+    let channels = output_config.channels() as usize;
+
     let stream = output_device
         .build_output_stream(
-            &output_config_clone.into(),
+            &output_stream_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                let mut input_signal = output_signal.lock().unwrap();
-                if !input_signal.is_empty() {
-                    if processed_signal_cache.is_none() {
-                        let processed_signal = audio_trans(
-                            &hparams,
-                            &session,
-                            input_signal.clone(),
-                            hparams.target_speaker_id,
-                            hparams.stft_padding_frames, // STFT の dispose 値を渡す
-                            hparams.conv1d_padding_frames, // Conv1D の dispose 値を渡す
-                        );
-                        let resampled = resampler.process(&[processed_signal], None).unwrap();
+                // Receive new data and add to output_buffer
+                while let Ok(processed_signal) = output_rx.try_recv() {
+                    let resampled = resampler.process(&[processed_signal], None).unwrap();
+                    output_buffer.extend_from_slice(&resampled[0]);
+                }
 
-                        // オーバーラップ合成
-                        let merged_signal =
-                            overlap_merge(&resampled[0], &prev_trans_wav, overlap_length);
-                        processed_signal_cache = Some(merged_signal.clone());
-                        prev_trans_wav = resampled[0].clone(); // 次回のために保存
-                        input_signal.clear();
+                // Output data to the audio device
+                for frame in data.chunks_mut(channels) {
+                    let sample = if sample_index < output_buffer.len() {
+                        output_buffer[sample_index]
+                    } else {
+                        0.0 // Output silence if no data is available
+                    };
+                    for channel in frame.iter_mut() {
+                        *channel = sample;
                     }
+                    sample_index += 1;
+                }
 
-                    let resampled_signal = processed_signal_cache.as_ref().unwrap();
-
-                    for frame in data.chunks_mut(output_config.channels() as usize) {
-                        let sample = if sample_index < resampled_signal.len() {
-                            resampled_signal[sample_index]
-                        } else {
-                            0.0
-                        };
-                        for channel in frame.iter_mut() {
-                            *channel = sample;
-                        }
-                        sample_index += 1;
-                    }
-
-                    if sample_index >= resampled_signal.len() {
-                        sample_index = 0;
-                        processed_signal_cache = None;
-                    }
+                // Clear the output buffer if all samples have been played
+                if sample_index >= output_buffer.len() {
+                    sample_index = 0;
+                    output_buffer.clear();
                 }
             },
             move |err| {
@@ -302,32 +328,116 @@ fn play_output(
 
     stream
 }
+use std::f32;
 
-fn overlap_merge(now_wav: &Vec<f32>, prev_wav: &Vec<f32>, overlap_length: usize) -> Vec<f32> {
-    if overlap_length == 0 || prev_wav.is_empty() {
-        return now_wav.clone();
-    }
-
-    let overlap_len = std::cmp::min(overlap_length, std::cmp::min(now_wav.len(), prev_wav.len()));
-    let now_head = &now_wav[..overlap_len];
-    let prev_tail = &prev_wav[prev_wav.len() - overlap_len..];
-
-    let gradation: Vec<f32> = (0..overlap_len)
-        .map(|i| (i as f32 / overlap_len as f32) * PI * 0.5)
-        .collect();
-
-    let mut merged: Vec<f32> = Vec::with_capacity(now_wav.len());
-
-    for i in 0..overlap_len {
-        let cos_grad = gradation[i].cos().powi(2);
-        let prev_cos_grad = (PI * 0.5 - gradation[i]).cos().powi(2);
-        let merged_sample = prev_tail[i] * prev_cos_grad + now_head[i] * cos_grad;
-        merged.push(merged_sample);
-    }
-
-    merged.extend_from_slice(&now_wav[overlap_len..]);
-    merged
+struct Sola {
+    overlap_size: usize,
+    sola_search_frame: usize,
+    prev_wav: Vec<f32>,
 }
+
+impl Sola {
+    fn new(overlap_size: usize, sola_search_frame: usize) -> Self {
+        Self {
+            overlap_size,
+            sola_search_frame,
+            prev_wav: vec![0.0; overlap_size],
+        }
+    }
+
+    fn merge(&mut self, wav: &[f32]) -> Vec<f32> {
+        let sola_search_region = &wav[..self.sola_search_frame];
+        let cor_nom = self.convolve(&self.prev_wav, sola_search_region);
+        let cor_den = self.calculate_root_energy(&self.prev_wav, self.sola_search_frame);
+        let sola_offset = self.calculate_sola_offset(&cor_nom, &cor_den);
+
+        let prev_sola_match_region =
+            &self.prev_wav[sola_offset..sola_offset + self.sola_search_frame];
+        let crossfade_wav = self.crossfade(sola_search_region, prev_sola_match_region);
+        let sola_merge_wav = [
+            &self.prev_wav[..sola_offset],
+            &crossfade_wav,
+            &wav[self.sola_search_frame..],
+        ]
+        .concat();
+
+        let output_wav =
+            sola_merge_wav[..sola_merge_wav.len() - (sola_offset + self.overlap_size)].to_vec();
+
+        // 次のチャンク用に保存
+        let start = wav.len() - self.overlap_size - sola_offset;
+        let end = wav.len() - sola_offset;
+        self.prev_wav = wav[start..end].to_vec();
+
+        output_wav
+    }
+
+    fn calculate_sola_offset(&self, cor_nom: &[f32], cor_den: &[f32]) -> usize {
+        let mut idx = 0;
+        let mut max = f32::MIN;
+
+        for i in 0..cor_nom.len() {
+            let scaled_value = cor_nom[i] / (cor_den[i] + 1e-8); // 0除算を防ぐため
+            if scaled_value > max {
+                max = scaled_value;
+                idx = i;
+            }
+        }
+        idx
+    }
+
+    fn calculate_root_energy(&self, a: &[f32], len: usize) -> Vec<f32> {
+        let n = a.len();
+        if len == 0 || n < len {
+            panic!("Input arrays have incompatible sizes.");
+        }
+
+        let mut result = vec![0.0; n - len + 1];
+
+        for i in 0..result.len() {
+            let sum: f32 = a[i..i + len].iter().map(|&x| x.powi(2)).sum();
+            result[i] = sum.sqrt();
+        }
+
+        result
+    }
+
+    fn convolve(&self, a: &[f32], b: &[f32]) -> Vec<f32> {
+        let n = a.len();
+        let m = b.len();
+        if m == 0 || n < m {
+            panic!("Input arrays have incompatible sizes.");
+        }
+
+        let mut result = vec![0.0; n - m + 1];
+
+        for i in 0..result.len() {
+            let sum: f32 = a[i..i + m].iter().zip(b.iter()).map(|(&x, &y)| x * y).sum();
+            result[i] = sum;
+        }
+
+        result
+    }
+
+    fn crossfade(&self, cur_wav: &[f32], prev_wav: &[f32]) -> Vec<f32> {
+        if prev_wav.len() != cur_wav.len() {
+            panic!("prev_wav.len() != cur_wav.len()");
+        }
+
+        let crossfade_size = prev_wav.len();
+        let mut output_wav = cur_wav.to_vec();
+
+        for i in 0..crossfade_size {
+            let percent = i as f32 / crossfade_size as f32;
+            let prev_strength = (f32::cos(percent * 0.5 * PI)).powi(2);
+            let cur_strength = (f32::cos((1.0 - percent) * 0.5 * PI)).powi(2);
+            output_wav[i] = prev_wav[i] * prev_strength + cur_wav[i] * cur_strength;
+        }
+
+        output_wav
+    }
+}
+
 // デバイス選択用の関数
 fn select_device(devices: Vec<cpal::Device>, label: &str) -> cpal::Device {
     println!("{} デバイスを選択してください:", label);
@@ -339,50 +449,51 @@ fn select_device(devices: Vec<cpal::Device>, label: &str) -> cpal::Device {
     let index: usize = input.trim().parse().unwrap();
     devices.into_iter().nth(index).unwrap()
 }
-fn main() -> OrtResult<()> {
-    let hparams = Arc::new(AudioParams::new()); // `Arc`で共有する
 
-    // 環境の構築とCUDAプロバイダーの追加
+fn main() -> OrtResult<()> {
+    let hparams = Arc::new(AudioParams::new());
+
+    // 環境とセッションの構築
     let environment = Environment::builder()
         .with_name("MMVC_Client")
-        .with_execution_providers([ExecutionProvider::DirectML(Default::default())]) // CUDAプロバイダーを追加
+        .with_execution_providers([ExecutionProvider::DirectML(Default::default())])
         .build()?
         .into_arc();
 
-    // セッションの構築
     let session = SessionBuilder::new(&environment)?
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         .with_model_from_file("G_best.onnx")?;
 
     let buffer_size = 8192;
-    let input_signal = Arc::new(Mutex::new(Vec::new()));
 
     // デバイス選択
     let host = cpal::default_host();
     let input_device = select_device(host.input_devices().unwrap().collect(), "入力");
     let output_device = select_device(host.output_devices().unwrap().collect(), "出力");
 
-    // ストリームの作成
-    let input_stream = record_and_resample(
-        &hparams,
-        input_device,
-        Arc::clone(&input_signal),
-        buffer_size,
-    );
-    let output_stream = play_output(
-        Arc::clone(&hparams),
-        Arc::new(session),
-        output_device,
-        Arc::clone(&input_signal),
-        buffer_size,
-    );
+    // チャネルの作成
+    let (input_tx, input_rx): (Sender<Vec<f32>>, Receiver<Vec<f32>>) = bounded(10);
+    let (output_tx, output_rx): (Sender<Vec<f32>>, Receiver<Vec<f32>>) = bounded(10);
+
+    // 入力ストリームの作成
+    let input_stream = record_and_resample(&hparams, input_device, input_tx.clone(), buffer_size);
+
+    // 処理スレッドの開始
+    let hparams_clone = Arc::clone(&hparams);
+    let session_clone = Arc::new(session);
+    thread::spawn(move || {
+        processing_thread(hparams_clone, session_clone, input_rx, output_tx);
+    });
+
+    // 出力ストリームの作成
+    let output_stream = play_output(&hparams, output_device, output_rx, buffer_size);
 
     // ストリームの開始
     input_stream.play().unwrap();
     output_stream.play().unwrap();
 
-    // 永続ループで音声を処理し続ける
+    // メインスレッドをブロック
     loop {
-        std::thread::sleep(std::time::Duration::from_millis(50)); // 50msごとに処理
+        std::thread::sleep(std::time::Duration::from_millis(50));
     }
 }
