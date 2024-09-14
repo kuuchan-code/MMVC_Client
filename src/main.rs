@@ -7,6 +7,7 @@ use ort::{
 };
 use rubato::{FftFixedInOut, Resampler};
 use rustfft::{num_complex::Complex, FftPlanner};
+use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::sync::Arc;
 use std::thread;
@@ -322,9 +323,7 @@ fn play_output(
     )
     .unwrap();
 
-    let mut output_buffer: Vec<f32> = Vec::with_capacity(buffer_size * 10); // Make a larger buffer to hold more data
-    let mut sample_index = 0;
-
+    let mut output_buffer: VecDeque<f32> = VecDeque::with_capacity(buffer_size * 10);
     let output_stream_config = output_config.config().clone();
     let channels = output_config.channels() as usize;
 
@@ -332,7 +331,7 @@ fn play_output(
         .build_output_stream(
             &output_stream_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                // Check if new data is available from the processing thread
+                // Receive new data and append to the buffer
                 while let Ok(processed_signal) = output_rx.try_recv() {
                     println!("Received processed signal of length: {}", processed_signal.len());
 
@@ -341,31 +340,25 @@ fn play_output(
 
                     println!("Resampled output signal length: {}", resampled[0].len());
 
-                    // Append resampled data to the output buffer without clearing it
-                    output_buffer.extend_from_slice(&resampled[0]);
+                    // Append resampled data to the output buffer
+                    output_buffer.extend(resampled[0].iter());
                 }
 
                 println!("Output buffer size before playback: {}", output_buffer.len());
 
                 // Play audio data from the buffer
                 for frame in data.chunks_mut(channels) {
-                    let sample = if sample_index < output_buffer.len() {
-                        output_buffer[sample_index]
+                    let sample = if let Some(s) = output_buffer.pop_front() {
+                        s
                     } else {
                         0.0 // Output silence if no data is available
                     };
                     for channel in frame.iter_mut() {
                         *channel = sample;
                     }
-                    sample_index += 1;
                 }
 
-                // If we've played all the samples, remove only the played data from the buffer
-                if sample_index >= output_buffer.len() {
-                    sample_index = 0;
-                    output_buffer.clear(); // Clear only when fully consumed
-                    println!("Output buffer cleared");
-                }
+                println!("Output buffer size after playback: {}", output_buffer.len());
             },
             move |err| {
                 eprintln!("Error occurred on output stream: {}", err);
