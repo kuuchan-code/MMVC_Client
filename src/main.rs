@@ -397,7 +397,14 @@ impl Sola {
     }
 
     fn merge(&mut self, wav: &[f32]) -> Vec<f32> {
-        // デバッグ：入力信号の長さを出力
+        // Check if this is the first chunk
+        if self.prev_wav.iter().all(|&x| x == 0.0) {
+            // No previous data, so skip crossfade
+            let output_wav = wav[..wav.len() - self.overlap_size].to_vec();
+            // Save overlap for next chunk
+            self.prev_wav = wav[wav.len() - self.overlap_size..].to_vec();
+            return output_wav;
+        } // デバッグ：入力信号の長さを出力
         println!("SOLA merge input wav length: {}", wav.len());
 
         let sola_search_region = &wav[..self.sola_search_frame];
@@ -484,12 +491,12 @@ impl Sola {
         }
 
         let crossfade_size = prev_wav.len();
-        let mut output_wav = cur_wav.to_vec();
+        let mut output_wav = vec![0.0; crossfade_size];
 
         for i in 0..crossfade_size {
             let percent = i as f32 / crossfade_size as f32;
-            let prev_strength = (f32::cos(percent * 0.5 * PI)).powi(2);
-            let cur_strength = (f32::cos((1.0 - percent) * 0.5 * PI)).powi(2);
+            let prev_strength = 0.5 * (1.0 + (std::f32::consts::PI * percent).cos());
+            let cur_strength = 1.0 - prev_strength;
             output_wav[i] = prev_wav[i] * prev_strength + cur_wav[i] * cur_strength;
         }
 
