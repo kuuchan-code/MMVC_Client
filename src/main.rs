@@ -8,6 +8,7 @@ use ort::{
 use rubato::{FftFixedInOut, Resampler};
 use rustfft::{num_complex::Complex, FftPlanner};
 use std::collections::VecDeque;
+use std::f32;
 use std::f32::consts::PI;
 use std::sync::Arc;
 use std::thread;
@@ -43,6 +44,7 @@ fn pad_audio_signal(signal: &Vec<f32>, fft_size: usize, hop_size: usize) -> Vec<
     padded_signal.extend(vec![0.0; pad_size]);
     padded_signal
 }
+
 fn dispose_stft_padding(spec: &mut Array3<f32>, stft_padding_frames: usize) {
     let spec_len = spec.shape()[2];
     if stft_padding_frames > 0 && spec_len > 2 * stft_padding_frames {
@@ -203,7 +205,6 @@ fn apply_stft_with_hann_window(
     spectrogram
 }
 
-
 // 音声処理関数
 fn audio_trans(
     hparams: &AudioParams,
@@ -214,7 +215,7 @@ fn audio_trans(
     conv1d_padding_frames: usize, // conv1d_padding_frames 引数を追加
 ) -> Vec<f32> {
     // ハンウィンドウを適用したSTFTを実行
-    let spec = apply_stft_with_hann_window(
+    let mut spec = apply_stft_with_hann_window(
         &signal,
         hparams.fft_window_size, // n_fft
         hparams.hop_size,        // hop_size
@@ -222,7 +223,7 @@ fn audio_trans(
     );
 
     // STFT パディング削除
-    // dispose_stft_padding(&mut spec, stft_padding_frames); // stft_padding_frames を適用
+    dispose_stft_padding(&mut spec, stft_padding_frames); // stft_padding_frames を適用
 
     println!("spec shape after dispose: {:?}", spec.shape());
 
@@ -232,10 +233,10 @@ fn audio_trans(
     let sid_target = hparams.target_speaker_id; // 既存のターゲットID
 
     // モデルの実行
-    let audio = run_onnx_model_inference(session, &spec, &spec_lengths, &sid_src, sid_target);
+    let mut audio = run_onnx_model_inference(session, &spec, &spec_lengths, &sid_src, sid_target);
 
     // Conv1D パディング削除
-    // dispose_conv1d_padding(&mut audio, conv1d_padding_frames); // conv1d_padding_frames を適用
+    dispose_conv1d_padding(&mut audio, conv1d_padding_frames); // conv1d_padding_frames を適用
 
     audio
 }
@@ -333,7 +334,10 @@ fn play_output(
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
                 // Receive new data and append to the buffer
                 while let Ok(processed_signal) = output_rx.try_recv() {
-                    println!("Received processed signal of length: {}", processed_signal.len());
+                    println!(
+                        "Received processed signal of length: {}",
+                        processed_signal.len()
+                    );
 
                     // Resample the processed signal to the output sample rate
                     let resampled = resampler.process(&[processed_signal], None).unwrap();
@@ -344,7 +348,10 @@ fn play_output(
                     output_buffer.extend(resampled[0].iter());
                 }
 
-                println!("Output buffer size before playback: {}", output_buffer.len());
+                println!(
+                    "Output buffer size before playback: {}",
+                    output_buffer.len()
+                );
 
                 // Play audio data from the buffer
                 for frame in data.chunks_mut(channels) {
@@ -369,8 +376,6 @@ fn play_output(
 
     stream
 }
-
-use std::f32;
 
 struct Sola {
     overlap_size: usize,
@@ -412,8 +417,7 @@ impl Sola {
         // デバッグ：SOLAマージ後の信号の長さを出力
         println!("SOLA merged wav length: {}", sola_merge_wav.len());
 
-        let output_wav =
-            sola_merge_wav[..sola_merge_wav.len() - (sola_offset + self.overlap_size)].to_vec();
+        let output_wav = sola_merge_wav[..sola_merge_wav.len() - self.overlap_size].to_vec();
 
         // 次のチャンク用に保存
         let start = wav.len() - self.overlap_size - sola_offset;
