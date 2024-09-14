@@ -33,13 +33,132 @@ impl AudioParams {
         }
     }
 }
-// STFTを実行してスペクトログラムを計算
+
+// オーディオ信号にパディングを追加
+fn pad_audio_signal(signal: &Vec<f32>, fft_size: usize, hop_size: usize) -> Vec<f32> {
+    let pad_size = (fft_size - hop_size) / 2;
+    let mut padded_signal = vec![0.0; pad_size];
+    padded_signal.extend_from_slice(signal);
+    padded_signal.extend(vec![0.0; pad_size]);
+    padded_signal
+}
+fn dispose_stft_padding(spec: &mut Array3<f32>, stft_padding_frames: usize) {
+    let spec_len = spec.shape()[2];
+    if stft_padding_frames > 0 && spec_len > 2 * stft_padding_frames {
+        *spec = spec
+            .slice(s![
+                ..,
+                ..,
+                stft_padding_frames..spec_len - stft_padding_frames
+            ])
+            .to_owned();
+    }
+}
+
+fn dispose_conv1d_padding(audio: &mut Vec<f32>, dispose_conv1d_length: usize) {
+    let audio_len = audio.len();
+    if dispose_conv1d_length > 0 && audio_len > 2 * dispose_conv1d_length {
+        *audio = audio[dispose_conv1d_length..audio_len - dispose_conv1d_length].to_vec();
+    }
+}
+use std::time::Instant;
+
+fn processing_thread(
+    hparams: Arc<AudioParams>,
+    session: Arc<ort::Session>,
+    input_rx: Receiver<Vec<f32>>,
+    output_tx: Sender<Vec<f32>>,
+) {
+    // SOLAのパラメータ設定
+    let sola_search_frame = 128;
+    let overlap_size = sola_search_frame * 2;
+    let mut sola = Sola::new(overlap_size, sola_search_frame);
+
+    loop {
+        match input_rx.recv() {
+            Ok(input_signal) => {
+                // デバッグ：受信した信号の長さを出力
+                println!("Processing signal of length: {}", input_signal.len());
+
+                // STFTと音声変換処理時間を計測
+                let start_time = Instant::now();
+
+                // 音声変換処理
+                let processed_signal = audio_trans(
+                    &hparams,
+                    &session,
+                    input_signal,
+                    hparams.target_speaker_id,
+                    hparams.stft_padding_frames,
+                    hparams.conv1d_padding_frames,
+                );
+
+                let processing_duration = start_time.elapsed();
+                println!("STFT and ONNX inference time: {:?}", processing_duration);
+
+                // SOLAマージ処理時間を計測
+                let start_time_sola = Instant::now();
+
+                // SOLAによるマージ
+                let merged_signal = sola.merge(&processed_signal);
+
+                let sola_duration = start_time_sola.elapsed();
+                println!("SOLA merging time: {:?}", sola_duration);
+
+                // デバッグ：マージ後の信号の長さを出力
+                println!("Merged signal length: {}", merged_signal.len());
+
+                // マージした信号を送信
+                if let Err(err) = output_tx.send(merged_signal) {
+                    eprintln!("Failed to send output data: {}", err);
+                }
+            }
+            Err(err) => {
+                eprintln!("Failed to receive input data: {}", err);
+                break;
+            }
+        }
+    }
+}
+
+fn run_onnx_model_inference(
+    session: &ort::Session,
+    spectrogram: &Array3<f32>,
+    spectrogram_lengths: &Array1<i64>,
+    source_speaker_id: &Array1<i64>,
+    target_speaker_id: i64,
+) -> Vec<f32> {
+    let start_time = Instant::now(); // Start measuring time for ONNX inference
+
+    let spec_cow = CowArray::from(spectrogram.clone().into_dyn());
+    let spec_lengths_cow = CowArray::from(spectrogram_lengths.clone().into_dyn());
+    let source_id_cow = CowArray::from(source_speaker_id.clone().into_dyn());
+    let target_id_cow = CowArray::from(Array1::from_elem(1, target_speaker_id).into_dyn());
+
+    let inputs = vec![
+        Value::from_array(session.allocator(), &spec_cow).unwrap(),
+        Value::from_array(session.allocator(), &spec_lengths_cow).unwrap(),
+        Value::from_array(session.allocator(), &source_id_cow).unwrap(),
+        Value::from_array(session.allocator(), &target_id_cow).unwrap(),
+    ];
+
+    let outputs: Vec<Value> = session.run(inputs).unwrap();
+    let audio_output: ort::tensor::OrtOwnedTensor<f32, _> = outputs[0].try_extract().unwrap();
+
+    let duration = start_time.elapsed(); // Measure the elapsed time for inference
+    println!("ONNX model inference time: {:?}", duration);
+
+    audio_output.view().to_owned().into_raw_vec()
+}
+
 fn apply_stft_with_hann_window(
     audio_signal: &Vec<f32>,
     fft_size: usize,
     hop_size: usize,
     window_size: usize,
 ) -> Array3<f32> {
+    let start_time = Instant::now(); // Start measuring time for STFT
+
     // ハンウィンドウの作成
     let hann_window: Vec<f32> = (0..window_size)
         .map(|n| 0.5 * (1.0 - (2.0 * PI * n as f32 / window_size as f32).cos()))
@@ -77,62 +196,12 @@ fn apply_stft_with_hann_window(
         }
     }
 
+    let duration = start_time.elapsed(); // Measure the elapsed time for STFT
+    println!("STFT processing time: {:?}", duration);
+
     spectrogram
 }
 
-// オーディオ信号にパディングを追加
-fn pad_audio_signal(signal: &Vec<f32>, fft_size: usize, hop_size: usize) -> Vec<f32> {
-    let pad_size = (fft_size - hop_size) / 2;
-    let mut padded_signal = vec![0.0; pad_size];
-    padded_signal.extend_from_slice(signal);
-    padded_signal.extend(vec![0.0; pad_size]);
-    padded_signal
-}
-fn dispose_stft_padding(spec: &mut Array3<f32>, stft_padding_frames: usize) {
-    let spec_len = spec.shape()[2];
-    if stft_padding_frames > 0 && spec_len > 2 * stft_padding_frames {
-        *spec = spec
-            .slice(s![
-                ..,
-                ..,
-                stft_padding_frames..spec_len - stft_padding_frames
-            ])
-            .to_owned();
-    }
-}
-
-fn dispose_conv1d_padding(audio: &mut Vec<f32>, dispose_conv1d_length: usize) {
-    let audio_len = audio.len();
-    if dispose_conv1d_length > 0 && audio_len > 2 * dispose_conv1d_length {
-        *audio = audio[dispose_conv1d_length..audio_len - dispose_conv1d_length].to_vec();
-    }
-}
-
-// ONNXモデルを推論する関数
-fn run_onnx_model_inference(
-    session: &ort::Session,
-    spectrogram: &Array3<f32>,
-    spectrogram_lengths: &Array1<i64>,
-    source_speaker_id: &Array1<i64>,
-    target_speaker_id: i64,
-) -> Vec<f32> {
-    let spec_cow = CowArray::from(spectrogram.clone().into_dyn());
-    let spec_lengths_cow = CowArray::from(spectrogram_lengths.clone().into_dyn());
-    let source_id_cow = CowArray::from(source_speaker_id.clone().into_dyn());
-    let target_id_cow = CowArray::from(Array1::from_elem(1, target_speaker_id).into_dyn());
-
-    let inputs = vec![
-        Value::from_array(session.allocator(), &spec_cow).unwrap(),
-        Value::from_array(session.allocator(), &spec_lengths_cow).unwrap(),
-        Value::from_array(session.allocator(), &source_id_cow).unwrap(),
-        Value::from_array(session.allocator(), &target_id_cow).unwrap(),
-    ];
-
-    let outputs: Vec<Value> = session.run(inputs).unwrap();
-    let audio_output: ort::tensor::OrtOwnedTensor<f32, _> = outputs[0].try_extract().unwrap();
-
-    audio_output.view().to_owned().into_raw_vec()
-}
 
 // 音声処理関数
 fn audio_trans(
@@ -152,7 +221,7 @@ fn audio_trans(
     );
 
     // STFT パディング削除
-    dispose_stft_padding(&mut spec, stft_padding_frames); // stft_padding_frames を適用
+    // dispose_stft_padding(&mut spec, stft_padding_frames); // stft_padding_frames を適用
 
     println!("spec shape after dispose: {:?}", spec.shape());
 
@@ -165,7 +234,7 @@ fn audio_trans(
     let mut audio = run_onnx_model_inference(session, &spec, &spec_lengths, &sid_src, sid_target);
 
     // Conv1D パディング削除
-    dispose_conv1d_padding(&mut audio, conv1d_padding_frames); // conv1d_padding_frames を適用
+    // dispose_conv1d_padding(&mut audio, conv1d_padding_frames); // conv1d_padding_frames を適用
 
     audio
 }
@@ -199,6 +268,9 @@ fn record_and_resample(
         .build_input_stream(
             &input_stream_config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                // デバッグ：入力データの長さを出力
+                println!("Received {} frames from input device", data.len());
+
                 let mono_signal: Vec<f32> = data
                     .chunks(frequency_bins as usize)
                     .map(|chunk| chunk.iter().sum::<f32>() / frequency_bins as f32)
@@ -206,9 +278,16 @@ fn record_and_resample(
 
                 buffer.extend_from_slice(&mono_signal);
 
+                // デバッグ：バッファのサイズを出力
+                println!("Input buffer size: {}", buffer.len());
+
                 // バッファが指定サイズに達したらリサンプリングして送信
                 if buffer.len() >= buffer_size {
                     let resampled = resampler.process(&[buffer.clone()], None).unwrap();
+
+                    // デバッグ：リサンプル後のデータ長を出力
+                    println!("Resampled data length: {}", resampled[0].len());
+
                     if let Err(err) = input_tx.send(resampled[0].clone()) {
                         eprintln!("Failed to send input data: {}", err);
                     }
@@ -223,45 +302,6 @@ fn record_and_resample(
         .unwrap();
 
     stream
-}
-fn processing_thread(
-    hparams: Arc<AudioParams>,
-    session: Arc<ort::Session>,
-    input_rx: Receiver<Vec<f32>>,
-    output_tx: Sender<Vec<f32>>,
-) {
-    // SOLAのパラメータ設定
-    let sola_search_frame = 128;
-    let overlap_size = sola_search_frame * 2;
-    let mut sola = Sola::new(overlap_size, sola_search_frame);
-
-    loop {
-        match input_rx.recv() {
-            Ok(input_signal) => {
-                // 音声変換処理
-                let processed_signal = audio_trans(
-                    &hparams,
-                    &session,
-                    input_signal,
-                    hparams.target_speaker_id,
-                    hparams.stft_padding_frames,
-                    hparams.conv1d_padding_frames,
-                );
-
-                // SOLAによるマージ
-                let merged_signal = sola.merge(&processed_signal);
-
-                // マージした信号を送信
-                if let Err(err) = output_tx.send(merged_signal) {
-                    eprintln!("Failed to send output data: {}", err);
-                }
-            }
-            Err(err) => {
-                eprintln!("Failed to receive input data: {}", err);
-                break;
-            }
-        }
-    }
 }
 
 fn play_output(
@@ -282,25 +322,32 @@ fn play_output(
     )
     .unwrap();
 
-    let mut output_buffer: Vec<f32> = Vec::new();
+    let mut output_buffer: Vec<f32> = Vec::with_capacity(buffer_size * 10); // Make a larger buffer to hold more data
     let mut sample_index = 0;
 
-    // Use config() to get a reference to StreamConfig and clone it
     let output_stream_config = output_config.config().clone();
-
     let channels = output_config.channels() as usize;
 
     let stream = output_device
         .build_output_stream(
             &output_stream_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                // Receive new data and add to output_buffer
+                // Check if new data is available from the processing thread
                 while let Ok(processed_signal) = output_rx.try_recv() {
+                    println!("Received processed signal of length: {}", processed_signal.len());
+
+                    // Resample the processed signal to the output sample rate
                     let resampled = resampler.process(&[processed_signal], None).unwrap();
+
+                    println!("Resampled output signal length: {}", resampled[0].len());
+
+                    // Append resampled data to the output buffer without clearing it
                     output_buffer.extend_from_slice(&resampled[0]);
                 }
 
-                // Output data to the audio device
+                println!("Output buffer size before playback: {}", output_buffer.len());
+
+                // Play audio data from the buffer
                 for frame in data.chunks_mut(channels) {
                     let sample = if sample_index < output_buffer.len() {
                         output_buffer[sample_index]
@@ -313,10 +360,11 @@ fn play_output(
                     sample_index += 1;
                 }
 
-                // Clear the output buffer if all samples have been played
+                // If we've played all the samples, remove only the played data from the buffer
                 if sample_index >= output_buffer.len() {
                     sample_index = 0;
-                    output_buffer.clear();
+                    output_buffer.clear(); // Clear only when fully consumed
+                    println!("Output buffer cleared");
                 }
             },
             move |err| {
@@ -328,6 +376,7 @@ fn play_output(
 
     stream
 }
+
 use std::f32;
 
 struct Sola {
@@ -346,10 +395,16 @@ impl Sola {
     }
 
     fn merge(&mut self, wav: &[f32]) -> Vec<f32> {
+        // デバッグ：入力信号の長さを出力
+        println!("SOLA merge input wav length: {}", wav.len());
+
         let sola_search_region = &wav[..self.sola_search_frame];
         let cor_nom = self.convolve(&self.prev_wav, sola_search_region);
         let cor_den = self.calculate_root_energy(&self.prev_wav, self.sola_search_frame);
         let sola_offset = self.calculate_sola_offset(&cor_nom, &cor_den);
+
+        // デバッグ：SOLAオフセットを出力
+        println!("SOLA offset: {}", sola_offset);
 
         let prev_sola_match_region =
             &self.prev_wav[sola_offset..sola_offset + self.sola_search_frame];
@@ -360,6 +415,9 @@ impl Sola {
             &wav[self.sola_search_frame..],
         ]
         .concat();
+
+        // デバッグ：SOLAマージ後の信号の長さを出力
+        println!("SOLA merged wav length: {}", sola_merge_wav.len());
 
         let output_wav =
             sola_merge_wav[..sola_merge_wav.len() - (sola_offset + self.overlap_size)].to_vec();
@@ -453,6 +511,8 @@ fn select_device(devices: Vec<cpal::Device>, label: &str) -> cpal::Device {
 fn main() -> OrtResult<()> {
     let hparams = Arc::new(AudioParams::new());
 
+    println!("Initializing environment and session...");
+
     // 環境とセッションの構築
     let environment = Environment::builder()
         .with_name("MMVC_Client")
@@ -464,12 +524,17 @@ fn main() -> OrtResult<()> {
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         .with_model_from_file("G_best.onnx")?;
 
+    println!("Session initialized successfully.");
+
     let buffer_size = 8192;
 
     // デバイス選択
     let host = cpal::default_host();
     let input_device = select_device(host.input_devices().unwrap().collect(), "入力");
     let output_device = select_device(host.output_devices().unwrap().collect(), "出力");
+
+    println!("Selected input device: {}", input_device.name().unwrap());
+    println!("Selected output device: {}", output_device.name().unwrap());
 
     // チャネルの作成
     let (input_tx, input_rx): (Sender<Vec<f32>>, Receiver<Vec<f32>>) = bounded(10);
@@ -478,19 +543,26 @@ fn main() -> OrtResult<()> {
     // 入力ストリームの作成
     let input_stream = record_and_resample(&hparams, input_device, input_tx.clone(), buffer_size);
 
+    println!("Input stream created.");
+
     // 処理スレッドの開始
     let hparams_clone = Arc::clone(&hparams);
     let session_clone = Arc::new(session);
     thread::spawn(move || {
+        println!("Processing thread started.");
         processing_thread(hparams_clone, session_clone, input_rx, output_tx);
     });
 
     // 出力ストリームの作成
     let output_stream = play_output(&hparams, output_device, output_rx, buffer_size);
 
+    println!("Output stream created.");
+
     // ストリームの開始
     input_stream.play().unwrap();
     output_stream.play().unwrap();
+
+    println!("Audio streams are now playing.");
 
     // メインスレッドをブロック
     loop {
