@@ -21,7 +21,6 @@ struct AudioParams {
     fft_window_size: usize,
     hop_size: usize,
     target_speaker_id: i64,
-    stft_padding_frames: usize,
     conv1d_padding_frames: usize,
 }
 
@@ -32,7 +31,6 @@ impl AudioParams {
             fft_window_size: 512,
             hop_size: 128,
             target_speaker_id: 2,
-            stft_padding_frames: 0,
             conv1d_padding_frames: 0,
         }
     }
@@ -47,16 +45,11 @@ fn pad_audio_signal(signal: &Vec<f32>, fft_size: usize, hop_size: usize) -> Vec<
     padded_signal
 }
 
-fn dispose_stft_padding(spec: &mut Array3<f32>, stft_padding_frames: usize) {
-    let spec_len = spec.shape()[2];
-    if stft_padding_frames > 0 && spec_len > 2 * stft_padding_frames {
-        *spec = spec
-            .slice(s![
-                ..,
-                ..,
-                stft_padding_frames..spec_len - stft_padding_frames
-            ])
-            .to_owned();
+fn dispose_padding(signal: &mut Vec<f32>, fft_size: usize, hop_size: usize) {
+    let pad_size = (fft_size - hop_size) / 2;
+    if signal.len() > 2 * pad_size {
+        // 信号の両端から pad_size を削除
+        *signal = signal[pad_size..signal.len() - pad_size].to_vec();
     }
 }
 
@@ -75,7 +68,7 @@ fn processing_thread(
 ) {
     // SOLAのパラメータ設定
     let sola_search_frame = 128;
-    let overlap_size = sola_search_frame * 2;
+    let overlap_size = 384;
     let mut sola = Sola::new(overlap_size, sola_search_frame);
 
     loop {
@@ -223,7 +216,7 @@ fn audio_trans(
     );
 
     // STFT パディング削除
-    dispose_stft_padding(&mut spec, stft_padding_frames); // stft_padding_frames を適用
+    dispose_padding(&mut spec, hparams.fft_window_size, hparams.hop_size); // stft_padding_frames を適用
 
     println!("spec shape after dispose: {:?}", spec.shape());
 
