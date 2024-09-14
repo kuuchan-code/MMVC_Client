@@ -213,7 +213,7 @@ fn audio_trans(
     conv1d_padding_frames: usize, // conv1d_padding_frames 引数を追加
 ) -> Vec<f32> {
     // ハンウィンドウを適用したSTFTを実行
-    let mut spec = apply_stft_with_hann_window(
+    let spec = apply_stft_with_hann_window(
         &signal,
         hparams.fft_window_size, // n_fft
         hparams.hop_size,        // hop_size
@@ -231,7 +231,7 @@ fn audio_trans(
     let sid_target = hparams.target_speaker_id; // 既存のターゲットID
 
     // モデルの実行
-    let mut audio = run_onnx_model_inference(session, &spec, &spec_lengths, &sid_src, sid_target);
+    let audio = run_onnx_model_inference(session, &spec, &spec_lengths, &sid_src, sid_target);
 
     // Conv1D パディング削除
     // dispose_conv1d_padding(&mut audio, conv1d_padding_frames); // conv1d_padding_frames を適用
