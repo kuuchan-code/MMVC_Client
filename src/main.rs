@@ -13,6 +13,8 @@ use std::f32::consts::PI;
 use std::sync::Arc;
 use std::thread;
 
+const BUFFER_SIZE: usize = 8192;
+
 // ハイパーパラメータ構造体
 struct AudioParams {
     sample_rate: u32,
@@ -65,7 +67,6 @@ fn dispose_conv1d_padding(audio: &mut Vec<f32>, dispose_conv1d_length: usize) {
     }
 }
 use std::time::Instant;
-
 fn processing_thread(
     hparams: Arc<AudioParams>,
     session: Arc<ort::Session>,
@@ -83,7 +84,7 @@ fn processing_thread(
                 // デバッグ：受信した信号の長さを出力
                 println!("Processing signal of length: {}", input_signal.len());
 
-                // STFTと音声変換処理時間を計測
+                // 処理時間計測の開始
                 let start_time = Instant::now();
 
                 // 音声変換処理
@@ -96,24 +97,23 @@ fn processing_thread(
                     hparams.conv1d_padding_frames,
                 );
 
-                let processing_duration = start_time.elapsed();
-                println!("STFT and ONNX inference time: {:?}", processing_duration);
-
-                // SOLAマージ処理時間を計測
-                let start_time_sola = Instant::now();
-
                 // SOLAによるマージ
                 let merged_signal = sola.merge(&processed_signal);
-
-                let sola_duration = start_time_sola.elapsed();
-                println!("SOLA merging time: {:?}", sola_duration);
-
-                // デバッグ：マージ後の信号の長さを出力
-                println!("Merged signal length: {}", merged_signal.len());
 
                 // マージした信号を送信
                 if let Err(err) = output_tx.send(merged_signal) {
                     eprintln!("Failed to send output data: {}", err);
+                }
+
+                // Total processing time
+                let processing_duration = start_time.elapsed();
+                println!("Total processing time: {:?}", processing_duration);
+
+                // Check if processing time is too long
+                if processing_duration.as_secs_f32()
+                    > (BUFFER_SIZE as f32 / hparams.sample_rate as f32)
+                {
+                    eprintln!("Processing is taking too long and may cause underruns.");
                 }
             }
             Err(err) => {
@@ -246,7 +246,6 @@ fn record_and_resample(
     hparams: &AudioParams,
     input_device: cpal::Device,
     input_tx: Sender<Vec<f32>>,
-    buffer_size: usize,
 ) -> cpal::Stream {
     let input_config = input_device.default_input_config().unwrap();
 
@@ -257,7 +256,7 @@ fn record_and_resample(
     let mut resampler = FftFixedInOut::<f32>::new(
         input_sample_rate as usize,
         hparams.sample_rate as usize,
-        buffer_size,
+        BUFFER_SIZE,
         1,
     )
     .unwrap();
@@ -284,7 +283,7 @@ fn record_and_resample(
                 println!("Input buffer size: {}", buffer.len());
 
                 // バッファが指定サイズに達したらリサンプリングして送信
-                if buffer.len() >= buffer_size {
+                if buffer.len() >= BUFFER_SIZE {
                     let resampled = resampler.process(&[buffer.clone()], None).unwrap();
 
                     // デバッグ：リサンプル後のデータ長を出力
@@ -310,7 +309,6 @@ fn play_output(
     hparams: &AudioParams,
     output_device: cpal::Device,
     output_rx: Receiver<Vec<f32>>,
-    buffer_size: usize,
 ) -> cpal::Stream {
     let output_config = output_device.default_output_config().unwrap();
     let output_sample_rate = output_config.sample_rate().0;
@@ -318,13 +316,13 @@ fn play_output(
     let mut resampler = FftFixedInOut::<f32>::new(
         hparams.sample_rate as usize,
         output_sample_rate as usize,
-        buffer_size / 2 - 2 * hparams.fft_window_size + hparams.hop_size
+        BUFFER_SIZE / 2 - 2 * hparams.fft_window_size + hparams.hop_size
             - hparams.conv1d_padding_frames * hparams.stft_padding_frames,
         1,
     )
     .unwrap();
 
-    let mut output_buffer: VecDeque<f32> = VecDeque::with_capacity(buffer_size * 10);
+    let mut output_buffer: VecDeque<f32> = VecDeque::with_capacity(BUFFER_SIZE * 10);
     let output_stream_config = output_config.config().clone();
     let channels = output_config.channels() as usize;
 
@@ -352,7 +350,7 @@ fn play_output(
                     "Output buffer size before playback: {}",
                     output_buffer.len()
                 );
-                if output_buffer.len() < buffer_size * 2 {
+                if output_buffer.len() < BUFFER_SIZE * 2 {
                     // データが蓄積されるまでスリープして待機
                     std::thread::sleep(std::time::Duration::from_millis(10));
                     return;
@@ -534,8 +532,6 @@ fn main() -> OrtResult<()> {
 
     println!("Session initialized successfully.");
 
-    let buffer_size = 8192;
-
     // デバイス選択
     let host = cpal::default_host();
     let input_device = select_device(host.input_devices().unwrap().collect(), "入力");
@@ -549,7 +545,7 @@ fn main() -> OrtResult<()> {
     let (output_tx, output_rx): (Sender<Vec<f32>>, Receiver<Vec<f32>>) = bounded(10);
 
     // 入力ストリームの作成
-    let input_stream = record_and_resample(&hparams, input_device, input_tx.clone(), buffer_size);
+    let input_stream = record_and_resample(&hparams, input_device, input_tx.clone());
 
     println!("Input stream created.");
 
@@ -562,7 +558,7 @@ fn main() -> OrtResult<()> {
     });
 
     // 出力ストリームの作成
-    let output_stream = play_output(&hparams, output_device, output_rx, buffer_size);
+    let output_stream = play_output(&hparams, output_device, output_rx);
 
     println!("Output stream created.");
 
