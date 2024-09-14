@@ -32,8 +32,8 @@ impl AudioParams {
             fft_window_size: 512,
             hop_size: 128,
             target_speaker_id: 2,
-            stft_padding_frames: 2,
-            conv1d_padding_frames: 10,
+            stft_padding_frames: 0,
+            conv1d_padding_frames: 0,
         }
     }
 }
@@ -316,8 +316,7 @@ fn play_output(
     let mut resampler = FftFixedInOut::<f32>::new(
         hparams.sample_rate as usize,
         output_sample_rate as usize,
-        BUFFER_SIZE / 2 - 2 * hparams.fft_window_size + hparams.hop_size
-            - hparams.conv1d_padding_frames * hparams.stft_padding_frames,
+        3840,
         1,
     )
     .unwrap();
