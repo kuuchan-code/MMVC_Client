@@ -1,7 +1,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::StreamConfig;
 use crossbeam_channel::{bounded, Receiver, Sender};
-use ndarray::{s, Array1, Array3, CowArray};
+use ndarray::{Array1, Array3, CowArray};
 use ort::{
     Environment, ExecutionProvider, GraphOptimizationLevel, OrtResult, SessionBuilder, Value,
 };
@@ -86,7 +86,6 @@ fn processing_thread(
                     &session,
                     input_signal,
                     hparams.target_speaker_id,
-                    hparams.stft_padding_frames,
                     hparams.conv1d_padding_frames,
                 );
 
@@ -202,21 +201,23 @@ fn apply_stft_with_hann_window(
 fn audio_trans(
     hparams: &AudioParams,
     session: &ort::Session,
-    signal: Vec<f32>,
+    signal: Vec<f32>, // signal はそのまま
     _target_speaker_id: i64,
-    stft_padding_frames: usize,   // stft_padding_frames 引数を追加
     conv1d_padding_frames: usize, // conv1d_padding_frames 引数を追加
 ) -> Vec<f32> {
+    // signal のコピーを作成
+    let mut signal_copy = signal.clone();
+
     // ハンウィンドウを適用したSTFTを実行
-    let mut spec = apply_stft_with_hann_window(
-        &signal,
+    let spec = apply_stft_with_hann_window(
+        &signal_copy,            // コピーを使用
         hparams.fft_window_size, // n_fft
         hparams.hop_size,        // hop_size
         hparams.fft_window_size, // win_size
     );
 
-    // STFT パディング削除
-    dispose_padding(&mut spec, hparams.fft_window_size, hparams.hop_size); // stft_padding_frames を適用
+    // STFT パディング削除 (コピーを使用)
+    dispose_padding(&mut signal_copy, hparams.fft_window_size, hparams.hop_size);
 
     println!("spec shape after dispose: {:?}", spec.shape());
 
@@ -228,7 +229,7 @@ fn audio_trans(
     // モデルの実行
     let mut audio = run_onnx_model_inference(session, &spec, &spec_lengths, &sid_src, sid_target);
 
-    // Conv1D パディング削除
+    // Conv1D パディング削除 (audio の可変参照を渡す)
     dispose_conv1d_padding(&mut audio, conv1d_padding_frames); // conv1d_padding_frames を適用
 
     audio
@@ -309,7 +310,7 @@ fn play_output(
     let mut resampler = FftFixedInOut::<f32>::new(
         hparams.sample_rate as usize,
         output_sample_rate as usize,
-        3840,
+        3712,
         1,
     )
     .unwrap();
