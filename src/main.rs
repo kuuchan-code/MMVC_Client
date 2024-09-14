@@ -524,7 +524,7 @@ fn main() -> OrtResult<()> {
     // 環境とセッションの構築
     let environment = Environment::builder()
         .with_name("MMVC_Client")
-        .with_execution_providers([ExecutionProvider::DirectML(Default::default())])
+        .with_execution_providers([ExecutionProvider::CUDA(Default::default())])
         .build()?
         .into_arc();
 
