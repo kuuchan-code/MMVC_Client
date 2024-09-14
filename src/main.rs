@@ -352,7 +352,11 @@ fn play_output(
                     "Output buffer size before playback: {}",
                     output_buffer.len()
                 );
-
+                if output_buffer.len() < buffer_size * 2 {
+                    // データが蓄積されるまでスリープして待機
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    return;
+                }
                 // Play audio data from the buffer
                 for frame in data.chunks_mut(channels) {
                     let sample = if let Some(s) = output_buffer.pop_front() {
