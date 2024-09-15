@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::{io, thread};
 
-const BUFFER_SIZE: usize = 25565;
+const BUFFER_SIZE: usize = 8192;
 
 // ハイパーパラメータ構造体
 struct AudioParams {
@@ -45,7 +45,7 @@ fn processing_thread(
     output_tx: Sender<Vec<f32>>,
 ) {
     let sola_search_frame = 128;
-    let overlap_size = 384;
+    let overlap_size = 256;
     let mut sola = Sola::new(overlap_size, sola_search_frame);
 
     loop {
