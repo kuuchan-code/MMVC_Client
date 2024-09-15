@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::{io, thread};
 
-const BUFFER_SIZE: usize = 8192;
+const BUFFER_SIZE: usize = 25565;
 
 // ハイパーパラメータ構造体
 struct AudioParams {
@@ -181,7 +181,6 @@ fn apply_stft_with_hann_window(
     spectrogram
 }
 
-// 音声の録音とリサンプリング
 fn record_and_resample(
     hparams: Arc<AudioParams>,
     input_device: cpal::Device,
@@ -215,21 +214,23 @@ fn record_and_resample(
                 buffer.extend_from_slice(&mono_signal);
                 println!("Input buffer size: {}", buffer.len());
 
-                if buffer.len() >= BUFFER_SIZE {
+                while buffer.len() >= BUFFER_SIZE {
+                    let chunk = buffer.drain(..BUFFER_SIZE).collect::<Vec<f32>>();
+
                     let mut resampled = vec![
                         0.0;
-                        buffer.len() * hparams.sample_rate as usize
+                        chunk.len() * hparams.sample_rate as usize
                             / input_sample_rate as usize
                     ];
                     let (_in_len, out_len) =
-                        resampler.process_float(0, &buffer, &mut resampled).unwrap();
+                        resampler.process_float(0, &chunk, &mut resampled).unwrap();
 
                     println!("Resampled data length: {}", out_len);
 
                     if input_tx.send(resampled[..out_len].to_vec()).is_err() {
                         eprintln!("Failed to send input data");
+                        break;
                     }
-                    buffer.clear();
                 }
             },
             move |err| {
