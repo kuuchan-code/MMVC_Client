@@ -197,7 +197,7 @@ fn record_and_resample(
         1,
         input_sample_rate as usize,
         hparams.sample_rate as usize,
-        1,
+        5,
     )
     .unwrap();
     let input_stream_config: StreamConfig = input_config.into();
@@ -257,7 +257,7 @@ fn play_output(
         1,
         hparams.sample_rate as usize,
         output_sample_rate as usize,
-        1,
+        5,
     )
     .unwrap();
     let mut output_buffer: VecDeque<f32> = VecDeque::with_capacity(BUFFER_SIZE * 10);
