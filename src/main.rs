@@ -286,6 +286,10 @@ fn play_output(
 
                     output_buffer.extend(resampled[..out_len].iter());
                 }
+                if output_buffer.len() < BUFFER_SIZE * 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                    return;
+                }
 
                 for frame in data.chunks_mut(channels) {
                     let sample = output_buffer.pop_front().unwrap_or(0.0);
