@@ -22,7 +22,6 @@ struct AudioParams {
     fft_window_size: usize,
     hop_size: usize,
     target_speaker_id: i64,
-    conv1d_padding_frames: usize,
 }
 
 impl AudioParams {
@@ -32,37 +31,7 @@ impl AudioParams {
             fft_window_size: 512,
             hop_size: 128,
             target_speaker_id: 2,
-            conv1d_padding_frames: 0,
         }
-    }
-}
-
-// オーディオ信号にパディングを追加
-fn pad_audio_signal(signal: &[f32], fft_size: usize, hop_size: usize) -> Vec<f32> {
-    let pad_size = (fft_size - hop_size) / 2;
-    let mut padded_signal = vec![0.0; pad_size];
-    padded_signal.extend_from_slice(signal);
-    padded_signal.extend(vec![0.0; pad_size]);
-    padded_signal
-}
-
-// オーディオ信号からパディングを削除
-fn remove_padding(signal: &[f32], fft_size: usize, hop_size: usize) -> Vec<f32> {
-    let pad_size = (fft_size - hop_size) / 2;
-    if signal.len() > 2 * pad_size {
-        signal[pad_size..signal.len() - pad_size].to_vec()
-    } else {
-        signal.to_vec()
-    }
-}
-
-// conv1dパディングを削除
-fn remove_conv1d_padding(signal: &[f32], padding_length: usize) -> Vec<f32> {
-    let len = signal.len();
-    if padding_length > 0 && len > 2 * padding_length {
-        signal[padding_length..len - padding_length].to_vec()
-    } else {
-        signal.to_vec()
     }
 }
 
@@ -73,8 +42,8 @@ fn processing_thread(
     input_rx: Receiver<Vec<f32>>,
     output_tx: Sender<Vec<f32>>,
 ) {
-    let sola_search_frame = 128;
-    let overlap_size = 384;
+    let sola_search_frame = 63;
+    let overlap_size = 192;
     let mut sola = Sola::new(overlap_size, sola_search_frame);
 
     loop {
@@ -89,7 +58,6 @@ fn processing_thread(
                     &session,
                     &input_signal,
                     hparams.target_speaker_id,
-                    hparams.conv1d_padding_frames,
                 );
 
                 // SOLAによるマージ
@@ -124,7 +92,6 @@ fn audio_transform(
     session: &Session,
     signal: &[f32],
     target_speaker_id: i64,
-    conv1d_padding_frames: usize,
 ) -> Vec<f32> {
     let spec = apply_stft_with_hann_window(
         signal,
@@ -133,18 +100,14 @@ fn audio_transform(
         hparams.fft_window_size,
     );
 
-    let signal = remove_padding(signal, hparams.fft_window_size, hparams.hop_size);
-
     println!("STFT spectrogram shape: {:?}", spec.shape());
 
     let spec_lengths = Array1::from_elem(1, spec.shape()[2] as i64);
     let sid_src = Array1::from_elem(1, 0);
 
-    let mut audio = run_onnx_model_inference(session, &spec, &spec_lengths, &sid_src, target_speaker_id);
+    let audio = run_onnx_model_inference(session, &spec, &spec_lengths, &sid_src, target_speaker_id);
 
     println!("Model output audio length: {}", audio.len());
-
-    audio = remove_conv1d_padding(&audio, conv1d_padding_frames);
 
     audio
 }
@@ -193,15 +156,13 @@ fn apply_stft_with_hann_window(
         .map(|n| 0.5 * (1.0 - (2.0 * PI * n as f32 / window_size as f32).cos()))
         .collect();
 
-    let padded_signal = pad_audio_signal(audio_signal, fft_size, hop_size);
-
     let mut fft_planner = FftPlanner::<f32>::new();
     let fft = fft_planner.plan_fft_forward(fft_size);
 
-    let num_frames = (padded_signal.len() - fft_size) / hop_size + 1;
+    let num_frames = (audio_signal.len() - fft_size) / hop_size + 1;
     let mut spectrogram = Array3::<f32>::zeros((1, fft_size / 2 + 1, num_frames));
 
-    for (i, frame) in padded_signal.windows(fft_size).step_by(hop_size).enumerate() {
+    for (i, frame) in audio_signal.windows(fft_size).step_by(hop_size).enumerate() {
         let mut complex_buffer: Vec<Complex<f32>> = frame
             .iter()
             .zip(&hann_window)
