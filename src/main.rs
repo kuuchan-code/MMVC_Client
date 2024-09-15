@@ -14,7 +14,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::{io, thread};
 
-const BUFFER_SIZE: usize = 16384;
+const BUFFER_SIZE: usize = 8192;
 
 // ハイパーパラメータ構造体
 struct AudioParams {
