@@ -11,8 +11,8 @@ use speexdsp_resampler::State as SpeexResampler;
 use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::sync::Arc;
-use std::thread;
 use std::time::Instant;
+use std::{io, thread};
 
 const BUFFER_SIZE: usize = 16384;
 
@@ -21,16 +21,18 @@ struct AudioParams {
     sample_rate: u32,
     fft_window_size: usize,
     hop_size: usize,
+    source_speaker_id: i64,
     target_speaker_id: i64,
 }
 
 impl AudioParams {
-    fn new() -> Self {
+    fn new(source_speaker_id: i64, target_speaker_id: i64) -> Self {
         Self {
             sample_rate: 24000,
             fft_window_size: 512,
             hop_size: 128,
-            target_speaker_id: 2,
+            source_speaker_id,
+            target_speaker_id,
         }
     }
 }
@@ -53,12 +55,7 @@ fn processing_thread(
                 let start_time = Instant::now();
 
                 // 音声変換処理
-                let processed_signal = audio_transform(
-                    &hparams,
-                    &session,
-                    &input_signal,
-                    hparams.target_speaker_id,
-                );
+                let processed_signal = audio_transform(&hparams, &session, &input_signal);
 
                 // SOLAによるマージ
                 let merged_signal = sola.merge(&processed_signal);
@@ -87,12 +84,7 @@ fn processing_thread(
 }
 
 // 音声変換処理
-fn audio_transform(
-    hparams: &AudioParams,
-    session: &Session,
-    signal: &[f32],
-    target_speaker_id: i64,
-) -> Vec<f32> {
+fn audio_transform(hparams: &AudioParams, session: &Session, signal: &[f32]) -> Vec<f32> {
     let spec = apply_stft_with_hann_window(
         signal,
         hparams.fft_window_size,
@@ -103,9 +95,15 @@ fn audio_transform(
     println!("STFT spectrogram shape: {:?}", spec.shape());
 
     let spec_lengths = Array1::from_elem(1, spec.shape()[2] as i64);
-    let sid_src = Array1::from_elem(1, 0);
+    let sid_src = Array1::from_elem(1, hparams.source_speaker_id);
 
-    let audio = run_onnx_model_inference(session, &spec, &spec_lengths, &sid_src, target_speaker_id);
+    let audio = run_onnx_model_inference(
+        session,
+        &spec,
+        &spec_lengths,
+        &sid_src,
+        hparams.target_speaker_id,
+    );
 
     println!("Model output audio length: {}", audio.len());
 
@@ -412,7 +410,24 @@ fn select_device(devices: Vec<cpal::Device>, label: &str) -> cpal::Device {
 }
 
 fn main() -> OrtResult<()> {
-    let hparams = Arc::new(AudioParams::new());
+    // ユーザーにsidとtarget_speaker_idを入力させる
+    println!("Enter source speaker ID (sid): ");
+    let mut sid_input = String::new();
+    io::stdin().read_line(&mut sid_input).unwrap();
+    let sid: i64 = sid_input
+        .trim()
+        .parse()
+        .expect("Invalid input for source speaker ID");
+
+    println!("Enter target speaker ID: ");
+    let mut target_speaker_id_input = String::new();
+    io::stdin().read_line(&mut target_speaker_id_input).unwrap();
+    let target_speaker_id: i64 = target_speaker_id_input
+        .trim()
+        .parse()
+        .expect("Invalid input for target speaker ID");
+
+    let hparams = Arc::new(AudioParams::new(sid, target_speaker_id));
 
     println!("Initializing environment and session...");
 
