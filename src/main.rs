@@ -59,26 +59,7 @@ fn dispose_conv1d_padding(audio: &mut Vec<f32>, dispose_conv1d_length: usize) {
         *audio = audio[dispose_conv1d_length..audio_len - dispose_conv1d_length].to_vec();
     }
 }
-use hound::{WavSpec, WavWriter};
 use std::time::Instant;
-
-// WAVファイルとして保存する関数
-fn save_as_wav(filename: &str, sample_rate: u32, data: &[f32]) {
-    let spec = WavSpec {
-        channels: 1, // モノラル
-        sample_rate,
-        bits_per_sample: 16, // 16ビットPCM
-        sample_format: hound::SampleFormat::Int,
-    };
-
-    let mut writer = WavWriter::create(filename, spec).unwrap();
-    for &sample in data {
-        // 16ビット整数に変換して書き込む
-        let scaled_sample = (sample * i16::MAX as f32) as i16;
-        writer.write_sample(scaled_sample).unwrap();
-    }
-    writer.finalize().unwrap();
-}
 
 fn processing_thread(
     hparams: Arc<AudioParams>,
@@ -96,10 +77,6 @@ fn processing_thread(
             Ok(input_signal) => {
                 // デバッグ: 受信した信号の長さを出力
                 println!("Processing signal of length: {}", input_signal.len());
-
-                // 入力信号をWAVファイルに保存
-                save_as_wav("input_signal.wav", hparams.sample_rate, &input_signal);
-                println!("Input signal saved to input_signal.wav");
 
                 // 処理時間計測の開始
                 let start_time = Instant::now();
@@ -168,10 +145,6 @@ fn audio_trans(
     println!("Model output audio length: {}", audio.len());
 
     dispose_conv1d_padding(&mut audio, conv1d_padding_frames);
-
-    // モデル出力をWAVファイルに保存
-    save_as_wav("model_output_audio.wav", hparams.sample_rate, &audio);
-    println!("Model output audio saved to model_output_audio.wav");
 
     audio
 }
@@ -317,9 +290,8 @@ fn record_and_resample(
 
     stream
 }
-
 fn play_output(
-    hparams: Arc<AudioParams>, // Use Arc here
+    hparams: Arc<AudioParams>,
     output_device: cpal::Device,
     output_rx: Receiver<Vec<f32>>,
 ) -> cpal::Stream {
@@ -337,11 +309,12 @@ fn play_output(
     let output_stream_config = output_config.config().clone();
     let channels = output_config.channels() as usize;
 
-    let hparams_clone = Arc::clone(&hparams); // Clone Arc for the closure
+    let hparams_clone = Arc::clone(&hparams);
     let stream = output_device
         .build_output_stream(
             &output_stream_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                // Read and resample new data
                 while let Ok(processed_signal) = output_rx.try_recv() {
                     println!(
                         "Received processed signal of length: {}",
@@ -355,23 +328,19 @@ fn play_output(
                     ];
                     let (_in_len, out_len) = resampler
                         .process_float(0, &processed_signal, &mut resampled)
-                        .unwrap(); // Ignore in_len
+                        .unwrap();
 
                     println!("Resampled output signal length: {}", out_len);
 
                     output_buffer.extend(resampled[..out_len].iter());
                 }
 
-                if output_buffer.len() < BUFFER_SIZE * 2 {
-                    std::thread::sleep(std::time::Duration::from_millis(10));
-                    return;
-                }
-
+                // Always fill the data buffer
                 for frame in data.chunks_mut(channels) {
                     let sample = if let Some(s) = output_buffer.pop_front() {
                         s
                     } else {
-                        0.0
+                        0.0 // Fill with zero if buffer is empty
                     };
                     for channel in frame.iter_mut() {
                         *channel = sample;
