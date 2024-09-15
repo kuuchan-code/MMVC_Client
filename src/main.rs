@@ -5,13 +5,13 @@ use ndarray::{Array1, Array3, CowArray};
 use ort::{
     Environment, ExecutionProvider, GraphOptimizationLevel, OrtResult, SessionBuilder, Value,
 };
-use rubato::{FftFixedInOut, Resampler};
 use rustfft::{num_complex::Complex, FftPlanner};
+use speexdsp_resampler::State as SpeexResampler;
 use std::collections::VecDeque;
 use std::f32;
 use std::f32::consts::PI;
 use std::sync::Arc;
-use std::thread;
+use std::thread; // Use speexdsp-resampler for resampling
 
 const BUFFER_SIZE: usize = 8192;
 
@@ -59,7 +59,27 @@ fn dispose_conv1d_padding(audio: &mut Vec<f32>, dispose_conv1d_length: usize) {
         *audio = audio[dispose_conv1d_length..audio_len - dispose_conv1d_length].to_vec();
     }
 }
+use hound::{WavSpec, WavWriter};
 use std::time::Instant;
+
+// WAVファイルとして保存する関数
+fn save_as_wav(filename: &str, sample_rate: u32, data: &[f32]) {
+    let spec = WavSpec {
+        channels: 1, // モノラル
+        sample_rate,
+        bits_per_sample: 16, // 16ビットPCM
+        sample_format: hound::SampleFormat::Int,
+    };
+
+    let mut writer = WavWriter::create(filename, spec).unwrap();
+    for &sample in data {
+        // 16ビット整数に変換して書き込む
+        let scaled_sample = (sample * i16::MAX as f32) as i16;
+        writer.write_sample(scaled_sample).unwrap();
+    }
+    writer.finalize().unwrap();
+}
+
 fn processing_thread(
     hparams: Arc<AudioParams>,
     session: Arc<ort::Session>,
@@ -74,8 +94,12 @@ fn processing_thread(
     loop {
         match input_rx.recv() {
             Ok(input_signal) => {
-                // デバッグ：受信した信号の長さを出力
+                // デバッグ: 受信した信号の長さを出力
                 println!("Processing signal of length: {}", input_signal.len());
+
+                // 入力信号をWAVファイルに保存
+                save_as_wav("input_signal.wav", hparams.sample_rate, &input_signal);
+                println!("Input signal saved to input_signal.wav");
 
                 // 処理時間計測の開始
                 let start_time = Instant::now();
@@ -97,11 +121,10 @@ fn processing_thread(
                     eprintln!("Failed to send output data: {}", err);
                 }
 
-                // Total processing time
+                // 処理時間の計測終了
                 let processing_duration = start_time.elapsed();
                 println!("Total processing time: {:?}", processing_duration);
 
-                // Check if processing time is too long
                 if processing_duration.as_secs_f32()
                     > (BUFFER_SIZE as f32 / hparams.sample_rate as f32)
                 {
@@ -114,6 +137,43 @@ fn processing_thread(
             }
         }
     }
+}
+
+fn audio_trans(
+    hparams: &AudioParams,
+    session: &ort::Session,
+    signal: Vec<f32>,
+    _target_speaker_id: i64,
+    conv1d_padding_frames: usize,
+) -> Vec<f32> {
+    let mut signal_copy = signal.clone();
+
+    let spec = apply_stft_with_hann_window(
+        &signal_copy,
+        hparams.fft_window_size,
+        hparams.hop_size,
+        hparams.fft_window_size,
+    );
+
+    dispose_padding(&mut signal_copy, hparams.fft_window_size, hparams.hop_size);
+
+    println!("STFT spectrogram shape: {:?}", spec.shape());
+
+    let spec_lengths = Array1::from_elem(1, spec.shape()[2] as i64);
+    let sid_src = Array1::from_elem(1, 0);
+    let sid_target = hparams.target_speaker_id;
+
+    let mut audio = run_onnx_model_inference(session, &spec, &spec_lengths, &sid_src, sid_target);
+
+    println!("Model output audio length: {}", audio.len());
+
+    dispose_conv1d_padding(&mut audio, conv1d_padding_frames);
+
+    // モデル出力をWAVファイルに保存
+    save_as_wav("model_output_audio.wav", hparams.sample_rate, &audio);
+    println!("Model output audio saved to model_output_audio.wav");
+
+    audio
 }
 
 fn run_onnx_model_inference(
@@ -197,73 +257,30 @@ fn apply_stft_with_hann_window(
     spectrogram
 }
 
-// 音声処理関数
-fn audio_trans(
-    hparams: &AudioParams,
-    session: &ort::Session,
-    signal: Vec<f32>, // signal はそのまま
-    _target_speaker_id: i64,
-    conv1d_padding_frames: usize, // conv1d_padding_frames 引数を追加
-) -> Vec<f32> {
-    // signal のコピーを作成
-    let mut signal_copy = signal.clone();
-
-    // ハンウィンドウを適用したSTFTを実行
-    let spec = apply_stft_with_hann_window(
-        &signal_copy,            // コピーを使用
-        hparams.fft_window_size, // n_fft
-        hparams.hop_size,        // hop_size
-        hparams.fft_window_size, // win_size
-    );
-
-    // STFT パディング削除 (コピーを使用)
-    dispose_padding(&mut signal_copy, hparams.fft_window_size, hparams.hop_size);
-
-    println!("spec shape after dispose: {:?}", spec.shape());
-
-    // spec_lengthsを1次元に修正
-    let spec_lengths = Array1::from_elem(1, spec.shape()[2] as i64); // 1次元配列
-    let sid_src = Array1::from_elem(1, 0); // `sid_src`を0に設定、1次元配列
-    let sid_target = hparams.target_speaker_id; // 既存のターゲットID
-
-    // モデルの実行
-    let mut audio = run_onnx_model_inference(session, &spec, &spec_lengths, &sid_src, sid_target);
-
-    // Conv1D パディング削除 (audio の可変参照を渡す)
-    dispose_conv1d_padding(&mut audio, conv1d_padding_frames); // conv1d_padding_frames を適用
-
-    audio
-}
-
-// マイク入力から音声を取得しリサンプリングする関数（デバイス選択対応）
 fn record_and_resample(
-    hparams: &AudioParams,
+    hparams: Arc<AudioParams>, // Use Arc here
     input_device: cpal::Device,
     input_tx: Sender<Vec<f32>>,
 ) -> cpal::Stream {
     let input_config = input_device.default_input_config().unwrap();
-
     let frequency_bins = input_config.channels();
     let input_sample_rate = input_config.sample_rate().0;
 
-    // リサンプラーの設定
-    let mut resampler = FftFixedInOut::<f32>::new(
+    let mut resampler = SpeexResampler::new(
+        1,
         input_sample_rate as usize,
         hparams.sample_rate as usize,
-        BUFFER_SIZE,
         1,
     )
     .unwrap();
-
     let input_stream_config: StreamConfig = input_config.into();
-
     let mut buffer = Vec::new();
 
+    let hparams_clone = Arc::clone(&hparams); // Clone Arc for the closure
     let stream = input_device
         .build_input_stream(
             &input_stream_config,
             move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                // デバッグ：入力データの長さを出力
                 println!("Received {} frames from input device", data.len());
 
                 let mono_signal: Vec<f32> = data
@@ -272,18 +289,20 @@ fn record_and_resample(
                     .collect();
 
                 buffer.extend_from_slice(&mono_signal);
-
-                // デバッグ：バッファのサイズを出力
                 println!("Input buffer size: {}", buffer.len());
 
-                // バッファが指定サイズに達したらリサンプリングして送信
                 if buffer.len() >= BUFFER_SIZE {
-                    let resampled = resampler.process(&[buffer.clone()], None).unwrap();
+                    let mut resampled = vec![
+                        0.0;
+                        buffer.len() * hparams_clone.sample_rate as usize
+                            / input_sample_rate as usize
+                    ];
+                    let (_in_len, out_len) =
+                        resampler.process_float(0, &buffer, &mut resampled).unwrap(); // Ignore in_len
 
-                    // デバッグ：リサンプル後のデータ長を出力
-                    println!("Resampled data length: {}", resampled[0].len());
+                    println!("Resampled data length: {}", out_len);
 
-                    if let Err(err) = input_tx.send(resampled[0].clone()) {
+                    if let Err(err) = input_tx.send(resampled[..out_len].to_vec()) {
                         eprintln!("Failed to send input data: {}", err);
                     }
                     buffer.clear();
@@ -300,60 +319,59 @@ fn record_and_resample(
 }
 
 fn play_output(
-    hparams: &AudioParams,
+    hparams: Arc<AudioParams>, // Use Arc here
     output_device: cpal::Device,
     output_rx: Receiver<Vec<f32>>,
 ) -> cpal::Stream {
     let output_config = output_device.default_output_config().unwrap();
     let output_sample_rate = output_config.sample_rate().0;
 
-    let mut resampler = FftFixedInOut::<f32>::new(
+    let mut resampler = SpeexResampler::new(
+        1,
         hparams.sample_rate as usize,
         output_sample_rate as usize,
-        3712,
         1,
     )
     .unwrap();
-
     let mut output_buffer: VecDeque<f32> = VecDeque::with_capacity(BUFFER_SIZE * 10);
     let output_stream_config = output_config.config().clone();
     let channels = output_config.channels() as usize;
 
+    let hparams_clone = Arc::clone(&hparams); // Clone Arc for the closure
     let stream = output_device
         .build_output_stream(
             &output_stream_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                // Receive new data and append to the buffer
                 while let Ok(processed_signal) = output_rx.try_recv() {
                     println!(
                         "Received processed signal of length: {}",
                         processed_signal.len()
                     );
 
-                    // Resample the processed signal to the output sample rate
-                    let resampled = resampler.process(&[processed_signal], None).unwrap();
+                    let mut resampled = vec![
+                        0.0;
+                        processed_signal.len() * output_sample_rate as usize
+                            / hparams_clone.sample_rate as usize
+                    ];
+                    let (_in_len, out_len) = resampler
+                        .process_float(0, &processed_signal, &mut resampled)
+                        .unwrap(); // Ignore in_len
 
-                    println!("Resampled output signal length: {}", resampled[0].len());
+                    println!("Resampled output signal length: {}", out_len);
 
-                    // Append resampled data to the output buffer
-                    output_buffer.extend(resampled[0].iter());
+                    output_buffer.extend(resampled[..out_len].iter());
                 }
 
-                println!(
-                    "Output buffer size before playback: {}",
-                    output_buffer.len()
-                );
                 if output_buffer.len() < BUFFER_SIZE * 2 {
-                    // データが蓄積されるまでスリープして待機
                     std::thread::sleep(std::time::Duration::from_millis(10));
                     return;
                 }
-                // Play audio data from the buffer
+
                 for frame in data.chunks_mut(channels) {
                     let sample = if let Some(s) = output_buffer.pop_front() {
                         s
                     } else {
-                        0.0 // Output silence if no data is available
+                        0.0
                     };
                     for channel in frame.iter_mut() {
                         *channel = sample;
@@ -538,7 +556,7 @@ fn main() -> OrtResult<()> {
     let (output_tx, output_rx): (Sender<Vec<f32>>, Receiver<Vec<f32>>) = bounded(10);
 
     // 入力ストリームの作成
-    let input_stream = record_and_resample(&hparams, input_device, input_tx.clone());
+    let input_stream = record_and_resample(Arc::clone(&hparams), input_device, input_tx.clone());
 
     println!("Input stream created.");
 
@@ -551,7 +569,7 @@ fn main() -> OrtResult<()> {
     });
 
     // 出力ストリームの作成
-    let output_stream = play_output(&hparams, output_device, output_rx);
+    let output_stream = play_output(Arc::clone(&hparams), output_device, output_rx);
 
     println!("Output stream created.");
 
