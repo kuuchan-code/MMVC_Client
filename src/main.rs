@@ -1,7 +1,6 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::StreamConfig;
 use crossbeam_channel::{bounded, Receiver, Sender};
-use hound; // 音声データ保存用クレート
 use ndarray::{Array1, Array3, CowArray};
 use ort::{
     tensor::OrtOwnedTensor, Environment, ExecutionProvider, GraphOptimizationLevel, OrtResult,
@@ -14,9 +13,8 @@ use std::f32::consts::PI;
 use std::io;
 use std::sync::Arc;
 use std::thread;
-use std::time::Instant;
 
-const BUFFER_SIZE: usize = 4096; // バッファサイズを増加
+const BUFFER_SIZE: usize = 2048; // バッファサイズを増加
 
 // ハイパーパラメータ構造体
 struct AudioParams {
@@ -27,7 +25,6 @@ struct AudioParams {
     target_speaker_id: i64,
     dispose_stft_frames: usize,
     dispose_conv1d_samples: usize,
-    min_spec_length: usize, // モデルが要求する最小フレーム数
 }
 
 impl AudioParams {
@@ -38,26 +35,10 @@ impl AudioParams {
             hop_size: 128,
             source_speaker_id,
             target_speaker_id,
-            dispose_stft_frames: 0,     // フレーム削除数を最小限に設定
-            dispose_conv1d_samples: 30, // 必要に応じて設定
-            min_spec_length: 8,         // モデルが要求する最小フレーム数
+            dispose_stft_frames: 0,    // フレーム削除数を最小限に設定
+            dispose_conv1d_samples: 0, // 必要に応じて設定
         }
     }
-}
-
-// 音声データの保存関数
-fn save_wav(filename: &str, data: &[f32], sample_rate: u32) {
-    let spec = hound::WavSpec {
-        channels: 1,
-        sample_rate,
-        bits_per_sample: 32,
-        sample_format: hound::SampleFormat::Float,
-    };
-    let mut writer = hound::WavWriter::create(filename, spec).unwrap();
-    for &sample in data {
-        writer.write_sample(sample).unwrap();
-    }
-    writer.finalize().unwrap();
 }
 
 // 処理スレッド
@@ -75,9 +56,6 @@ fn processing_thread(
     loop {
         match input_rx.recv() {
             Ok(mut input_signal) => {
-                println!("Processing signal of length: {}", input_signal.len());
-                let start_time = Instant::now();
-
                 // 前回の入力の終端を現在の入力の先頭に結合
                 if !prev_input_tail.is_empty() {
                     let mut extended_signal = prev_input_tail.clone();
@@ -88,20 +66,13 @@ fn processing_thread(
                 // 音声変換処理
                 let processed_signal = audio_transform(&hparams, &session, &input_signal);
 
-                // 音声データのデバッグ用保存
-                save_wav("after_dispose.wav", &processed_signal, hparams.sample_rate);
-
                 // 出力が無音の場合、スキップ
                 if processed_signal.iter().all(|&x| x == 0.0) {
-                    println!("Processed signal is silent. Skipping output.");
                     continue;
                 }
 
                 // SOLAによるマージ
                 let merged_signal = sola.merge(&processed_signal);
-
-                // 音声データのデバッグ用保存
-                save_wav("merged_signal.wav", &merged_signal, hparams.sample_rate);
 
                 // 次回のために入力の終端を保持
                 let dispose_length = (hparams.dispose_stft_frames * hparams.hop_size)
@@ -115,21 +86,10 @@ fn processing_thread(
 
                 // マージした信号を送信
                 if output_tx.send(merged_signal).is_err() {
-                    eprintln!("Failed to send output data");
                     break;
                 }
-
-                let processing_duration = start_time.elapsed();
-                println!("Total processing time: {:?}", processing_duration);
-
-                if processing_duration.as_secs_f32()
-                    > (BUFFER_SIZE as f32 / hparams.sample_rate as f32)
-                {
-                    eprintln!("Processing is taking too long and may cause underruns.");
-                }
             }
-            Err(err) => {
-                eprintln!("Failed to receive input data: {}", err);
+            Err(_) => {
                 break;
             }
         }
@@ -152,29 +112,18 @@ fn audio_transform(hparams: &Arc<AudioParams>, session: &Session, signal: &[f32]
         hparams.fft_window_size,
     );
 
-    println!("STFT spectrogram shape before dispose: {:?}", spec.shape());
-
     // STFTパディングによる影響を削除
     let total_frames = spec.shape()[2];
     let dispose_frames = hparams.dispose_stft_frames;
 
     // フレーム数が十分かチェック
-    if total_frames > 2 * dispose_frames + hparams.min_spec_length {
+    if total_frames > 2 * dispose_frames {
         let start = dispose_frames;
         let end = total_frames - dispose_frames;
         spec = spec
             .slice_axis(ndarray::Axis(2), ndarray::Slice::from(start..end))
             .to_owned();
-        println!("STFT spectrogram shape after dispose: {:?}", spec.shape());
-    } else {
-        println!("Not enough frames after disposal. Skipping frame disposal.");
-        // フレーム削除をスキップ
     }
-
-    // 音声データのデバッグ用保存
-    // NOTE: スペクトログラムを直接保存することは意味がありませんが、ここではデバッグのために保存します
-    // 実際にはスペクトログラムの可視化が必要です
-    // save_wav("model_input_spec.wav", &spec.as_standard_layout().iter().cloned().collect::<Vec<f32>>(), hparams.sample_rate);
 
     let spec_lengths = Array1::from_elem(1, spec.shape()[2] as i64);
     let sid_src = Array1::from_elem(1, hparams.source_speaker_id);
@@ -190,13 +139,9 @@ fn audio_transform(hparams: &Arc<AudioParams>, session: &Session, signal: &[f32]
     let mut audio = match audio_result {
         Some(a) => a,
         None => {
-            println!("Model inference failed. Outputting silence.");
             return vec![0.0; signal.len()];
         }
     };
-    // 音声データのデバッグ用保存
-    save_wav("model_output.wav", &audio, hparams.sample_rate);
-    println!("Model output audio length before dispose: {}", audio.len());
 
     // Conv1Dパディングによる影響を削除
     let dispose_samples = hparams.dispose_conv1d_samples;
@@ -204,9 +149,6 @@ fn audio_transform(hparams: &Arc<AudioParams>, session: &Session, signal: &[f32]
         let start = dispose_samples;
         let end = audio.len() - dispose_samples;
         audio = audio[start..end].to_vec();
-        println!("Model output audio length after dispose: {}", audio.len());
-    } else {
-        println!("Not enough audio samples after disposal. Skipping sample disposal.");
     }
 
     audio
@@ -220,8 +162,6 @@ fn run_onnx_model_inference(
     source_speaker_id: &Array1<i64>,
     target_speaker_id: i64,
 ) -> Option<Vec<f32>> {
-    let start_time = Instant::now();
-
     let spec_cow = CowArray::from(spectrogram.clone().into_dyn());
     let spec_lengths_cow = CowArray::from(spectrogram_lengths.clone().into_dyn());
     let source_id_cow = CowArray::from(source_speaker_id.clone().into_dyn());
@@ -236,22 +176,17 @@ fn run_onnx_model_inference(
 
     let outputs = match session.run(inputs) {
         Ok(o) => o,
-        Err(e) => {
-            eprintln!("ONNX model inference error: {:?}", e);
+        Err(_) => {
             return None;
         }
     };
 
     let audio_output: OrtOwnedTensor<f32, _> = match outputs[0].try_extract() {
         Ok(a) => a,
-        Err(e) => {
-            eprintln!("Failed to extract audio output: {:?}", e);
+        Err(_) => {
             return None;
         }
     };
-
-    let duration = start_time.elapsed();
-    println!("ONNX model inference time: {:?}", duration);
 
     Some(audio_output.view().to_owned().into_raw_vec())
 }
@@ -263,8 +198,6 @@ fn apply_stft_with_hann_window(
     hop_size: usize,
     window_size: usize,
 ) -> Array3<f32> {
-    let start_time = Instant::now();
-
     let hann_window: Vec<f32> = (0..window_size)
         .map(|n| 0.5 * (1.0 - (2.0 * PI * n as f32 / window_size as f32).cos()))
         .collect();
@@ -289,9 +222,6 @@ fn apply_stft_with_hann_window(
             spectrogram[[0, j, i]] = power;
         }
     }
-
-    let duration = start_time.elapsed();
-    println!("STFT processing time: {:?}", duration);
 
     spectrogram
 }
@@ -334,18 +264,14 @@ fn record_and_resample(
                         chunk.len() * hparams.sample_rate as usize
                             / input_sample_rate as usize
                     ];
-                    let (_in_len, _out_len) =
-                        resampler.process_float(0, &chunk, &mut resampled).unwrap();
+                    let _ = resampler.process_float(0, &chunk, &mut resampled);
 
                     if input_tx.send(resampled).is_err() {
-                        eprintln!("Failed to send input data");
                         break;
                     }
                 }
             },
-            move |err| {
-                eprintln!("Error occurred on input stream: {}", err);
-            },
+            move |_| {},
             None,
         )
         .unwrap();
@@ -382,9 +308,7 @@ fn play_output(
                         processed_signal.len() * output_sample_rate as usize
                             / hparams.sample_rate as usize
                     ];
-                    let (_in_len, _out_len) = resampler
-                        .process_float(0, &processed_signal, &mut resampled)
-                        .unwrap();
+                    let _ = resampler.process_float(0, &processed_signal, &mut resampled);
                     output_buffer.extend(resampled.iter());
                 }
                 if output_buffer.len() < data.len() {
@@ -404,15 +328,14 @@ fn play_output(
                     }
                 }
             },
-            move |err| {
-                eprintln!("Error occurred on output stream: {}", err);
-            },
+            move |_| {},
             None,
         )
         .unwrap();
 
     stream
 }
+
 // SOLAアルゴリズムの実装
 struct Sola {
     overlap_size: usize,
@@ -486,7 +409,7 @@ impl Sola {
         (0..crossfade_size)
             .map(|i| {
                 let t = i as f32 / (crossfade_size - 1) as f32;
-                let fade_in = 0.5 * (1.0 - (std::f32::consts::PI * t).cos());
+                let fade_in = 0.5 * (1.0 - (PI * t).cos());
                 let fade_out = 1.0 - fade_in;
                 prev_wav[i] * fade_out + cur_wav[i] * fade_in
             })
@@ -526,8 +449,6 @@ fn main() -> OrtResult<()> {
 
     let hparams = Arc::new(AudioParams::new(sid, target_speaker_id));
 
-    println!("Initializing environment and session...");
-
     // 環境とセッションの構築
     let environment = Environment::builder()
         .with_name("MMVC_Client")
@@ -539,15 +460,10 @@ fn main() -> OrtResult<()> {
         .with_optimization_level(GraphOptimizationLevel::Level3)?
         .with_model_from_file("G_best.onnx")?;
 
-    println!("Session initialized successfully.");
-
     // デバイス選択
     let host = cpal::default_host();
     let input_device = select_device(host.input_devices().unwrap().collect(), "入力");
     let output_device = select_device(host.output_devices().unwrap().collect(), "出力");
-
-    println!("Selected input device: {}", input_device.name().unwrap());
-    println!("Selected output device: {}", output_device.name().unwrap());
 
     // チャネルの作成
     let (input_tx, input_rx) = bounded(10);
@@ -556,26 +472,19 @@ fn main() -> OrtResult<()> {
     // 入力ストリームの作成
     let input_stream = record_and_resample(Arc::clone(&hparams), input_device, input_tx);
 
-    println!("Input stream created.");
-
     // 処理スレッドの開始
     let hparams_clone = Arc::clone(&hparams);
     let session_clone = Arc::new(session);
     thread::spawn(move || {
-        println!("Processing thread started.");
         processing_thread(hparams_clone, session_clone, input_rx, output_tx);
     });
 
     // 出力ストリームの作成
     let output_stream = play_output(Arc::clone(&hparams), output_device, output_rx);
 
-    println!("Output stream created.");
-
     // ストリームの開始
     input_stream.play().unwrap();
     output_stream.play().unwrap();
-
-    println!("Audio streams are now playing.");
 
     // メインスレッドをブロック
     loop {
