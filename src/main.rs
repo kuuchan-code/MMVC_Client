@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 
-const BUFFER_SIZE: usize = 16384; // バッファサイズを増加
+const BUFFER_SIZE: usize = 8192; // バッファサイズを増加
 
 // ハイパーパラメータ構造体
 struct AudioParams {
@@ -38,9 +38,9 @@ impl AudioParams {
             hop_size: 128,
             source_speaker_id,
             target_speaker_id,
-            dispose_stft_frames: 2,     // フレーム削除数を最小限に設定
-            dispose_conv1d_samples: 10, // 必要に応じて設定
-            min_spec_length: 8,         // モデルが要求する最小フレーム数
+            dispose_stft_frames: 0,    // フレーム削除数を最小限に設定
+            dispose_conv1d_samples: 0, // 必要に応じて設定
+            min_spec_length: 8,        // モデルが要求する最小フレーム数
         }
     }
 }
