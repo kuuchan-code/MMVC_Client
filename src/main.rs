@@ -1,20 +1,20 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::StreamConfig;
 use crossbeam_channel::{bounded, Receiver, Sender};
+use hound; // 音声データ保存用クレート
 use ndarray::{Array1, Array3, CowArray};
 use ort::{
     tensor::OrtOwnedTensor, Environment, ExecutionProvider, GraphOptimizationLevel, OrtResult,
     Session, SessionBuilder, Value,
 };
 use rustfft::{num_complex::Complex, FftPlanner};
+use speexdsp_resampler::State as SpeexResampler;
 use std::collections::VecDeque;
 use std::f32::consts::PI;
+use std::io;
 use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
-use std::io;
-use hound; // 音声データ保存用クレート
-use speexdsp_resampler::State as SpeexResampler;
 
 const BUFFER_SIZE: usize = 16384; // バッファサイズを増加
 
@@ -39,7 +39,7 @@ impl AudioParams {
             source_speaker_id,
             target_speaker_id,
             dispose_stft_frames: 2,      // フレーム削除数を最小限に設定
-            dispose_conv1d_samples: 0,   // 必要に応じて設定
+            dispose_conv1d_samples: 512, // 必要に応じて設定
             min_spec_length: 8,          // モデルが要求する最小フレーム数
         }
     }
@@ -162,7 +162,9 @@ fn audio_transform(hparams: &Arc<AudioParams>, session: &Session, signal: &[f32]
     if total_frames > 2 * dispose_frames + hparams.min_spec_length {
         let start = dispose_frames;
         let end = total_frames - dispose_frames;
-        spec = spec.slice_axis(ndarray::Axis(2), ndarray::Slice::from(start..end)).to_owned();
+        spec = spec
+            .slice_axis(ndarray::Axis(2), ndarray::Slice::from(start..end))
+            .to_owned();
         println!("STFT spectrogram shape after dispose: {:?}", spec.shape());
     } else {
         println!("Not enough frames after disposal. Skipping frame disposal.");
@@ -192,7 +194,8 @@ fn audio_transform(hparams: &Arc<AudioParams>, session: &Session, signal: &[f32]
             return vec![0.0; signal.len()];
         }
     };
-
+    // 音声データのデバッグ用保存
+    save_wav("model_output.wav", &audio, hparams.sample_rate);
     println!("Model output audio length before dispose: {}", audio.len());
 
     // Conv1Dパディングによる影響を削除
@@ -205,9 +208,6 @@ fn audio_transform(hparams: &Arc<AudioParams>, session: &Session, signal: &[f32]
     } else {
         println!("Not enough audio samples after disposal. Skipping sample disposal.");
     }
-
-    // 音声データのデバッグ用保存
-    save_wav("model_output.wav", &audio, hparams.sample_rate);
 
     audio
 }
@@ -310,7 +310,8 @@ fn record_and_resample(
         input_sample_rate as usize,
         hparams.sample_rate as usize,
         5,
-    )    .unwrap();
+    )
+    .unwrap();
 
     let input_stream_config: StreamConfig = input_config.into();
     let mut buffer = Vec::new();
@@ -383,7 +384,8 @@ fn play_output(
                     ];
                     let (_in_len, _out_len) = resampler
                         .process_float(0, &processed_signal, &mut resampled)
-                        .unwrap();                    output_buffer.extend(resampled.iter());
+                        .unwrap();
+                    output_buffer.extend(resampled.iter());
                 }
                 if output_buffer.len() < data.len() {
                     // バッファに十分なデータがない場合は無音を再生
@@ -444,7 +446,11 @@ impl Sola {
         // 相互相関の計算
         for offset in 0..=max_offset {
             let prev_segment = &self.prev_wav[offset..offset + search_range];
-            let corr = prev_segment.iter().zip(&wav[..search_range]).map(|(&a, &b)| a * b).sum::<f32>();
+            let corr = prev_segment
+                .iter()
+                .zip(&wav[..search_range])
+                .map(|(&a, &b)| a * b)
+                .sum::<f32>();
 
             if corr > max_corr {
                 max_corr = corr;
@@ -478,7 +484,7 @@ impl Sola {
         (0..crossfade_size)
             .map(|i| {
                 let fade_out = 1.0 - hann_window[i]; // 前の音声はフェードアウト
-                let fade_in = hann_window[i];         // 新しい音声はフェードイン
+                let fade_in = hann_window[i]; // 新しい音声はフェードイン
                 prev_wav[i] * fade_out + cur_wav[i] * fade_in
             })
             .collect()
