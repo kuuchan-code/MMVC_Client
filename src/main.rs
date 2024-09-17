@@ -38,9 +38,9 @@ impl AudioParams {
             hop_size: 128,
             source_speaker_id,
             target_speaker_id,
-            dispose_stft_frames: 2,      // フレーム削除数を最小限に設定
-            dispose_conv1d_samples: 512, // 必要に応じて設定
-            min_spec_length: 8,          // モデルが要求する最小フレーム数
+            dispose_stft_frames: 2,     // フレーム削除数を最小限に設定
+            dispose_conv1d_samples: 10, // 必要に応じて設定
+            min_spec_length: 8,         // モデルが要求する最小フレーム数
         }
     }
 }
@@ -67,8 +67,8 @@ fn processing_thread(
     input_rx: Receiver<Vec<f32>>,
     output_tx: Sender<Vec<f32>>,
 ) {
-    let sola_search_frame = 128;
-    let overlap_size = 256;
+    let sola_search_frame = 256;
+    let overlap_size = 384;
     let mut sola = Sola::new(overlap_size, sola_search_frame);
     let mut prev_input_tail: Vec<f32> = Vec::new();
 
@@ -413,7 +413,6 @@ fn play_output(
 
     stream
 }
-
 // SOLAアルゴリズムの実装
 struct Sola {
     overlap_size: usize,
@@ -443,14 +442,21 @@ impl Sola {
         let mut best_offset = 0;
         let mut max_corr = f32::MIN;
 
-        // 相互相関の計算
+        // 正規化された相互相関の計算
         for offset in 0..=max_offset {
             let prev_segment = &self.prev_wav[offset..offset + search_range];
-            let corr = prev_segment
+            let current_segment = &wav[..search_range];
+
+            let dot_product = prev_segment
                 .iter()
-                .zip(&wav[..search_range])
+                .zip(current_segment)
                 .map(|(&a, &b)| a * b)
                 .sum::<f32>();
+
+            let prev_norm = prev_segment.iter().map(|&a| a * a).sum::<f32>().sqrt();
+            let current_norm = current_segment.iter().map(|&b| b * b).sum::<f32>().sqrt();
+
+            let corr = dot_product / (prev_norm * current_norm + 1e-8); // ゼロ除算を防ぐために小さな値を加算
 
             if corr > max_corr {
                 max_corr = corr;
@@ -477,14 +483,11 @@ impl Sola {
 
     fn crossfade(&self, prev_wav: &[f32], cur_wav: &[f32]) -> Vec<f32> {
         let crossfade_size = prev_wav.len();
-        let hann_window: Vec<f32> = (0..crossfade_size)
-            .map(|n| 0.5 * (1.0 - (2.0 * PI * n as f32 / crossfade_size as f32).cos()))
-            .collect();
-
         (0..crossfade_size)
             .map(|i| {
-                let fade_out = 1.0 - hann_window[i]; // 前の音声はフェードアウト
-                let fade_in = hann_window[i]; // 新しい音声はフェードイン
+                let t = i as f32 / (crossfade_size - 1) as f32;
+                let fade_in = 0.5 * (1.0 - (std::f32::consts::PI * t).cos());
+                let fade_out = 1.0 - fade_in;
                 prev_wav[i] * fade_out + cur_wav[i] * fade_in
             })
             .collect()
