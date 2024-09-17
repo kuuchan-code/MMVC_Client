@@ -48,7 +48,7 @@ fn processing_thread(
     input_rx: Receiver<Vec<f32>>,
     output_tx: Sender<Vec<f32>>,
 ) {
-    let sola_search_frame = 384;
+    let sola_search_frame = 512;
     let overlap_size = 512;
     let mut sola = Sola::new(overlap_size, sola_search_frame);
     let mut prev_input_tail: Vec<f32> = Vec::new();
