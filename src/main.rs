@@ -48,8 +48,8 @@ fn processing_thread(
     input_rx: Receiver<Vec<f32>>,
     output_tx: Sender<Vec<f32>>,
 ) {
-    let sola_search_frame = 1024;
-    let overlap_size = 512;
+    let sola_search_frame = 2048;
+    let overlap_size = 2048;
     let mut sola = Sola::new(overlap_size, sola_search_frame);
     let mut prev_input_tail: Vec<f32> = Vec::new();
 
@@ -418,8 +418,7 @@ impl Sola {
         (0..crossfade_size)
             .map(|i| {
                 let t = i as f32 / (crossfade_size - 1) as f32;
-                // イージング関数を使用して滑らかなフェードを実現
-                let fade_in = t.powf(2.0) * (3.0 - 2.0 * t); // Smoothstep関数
+                let fade_in = 0.5 - 0.5 * (PI * t).cos(); // Sinusoidal crossfade
                 let fade_out = 1.0 - fade_in;
                 prev_wav[i] * fade_out + cur_wav[i] * fade_in
             })
