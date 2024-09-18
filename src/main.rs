@@ -449,6 +449,17 @@ fn main() -> OrtResult<()> {
     // デバイス選択
     println!("オーディオデバイスを取得中...");
     let host = cpal::default_host();
+
+    // 使用しているオーディオAPIの名前をデバッグフォーマットで取得
+    let host_id = host.id();
+    let host_name = format!("{:?}", host_id);
+    println!("使用しているオーディオAPI: {}", host_name);
+
+    // オーディオAPIに基づいてモードを表示（WASAPIの場合のみ共有モードを表示）
+    if host_name.contains("Wasapi") {
+        // cpalはWASAPIで共有モードをデフォルトで使用します
+        println!("WASAPIの共有モードを使用しています");
+    }
     let input_devices: Vec<Device> = host
         .input_devices()
         .expect("入力デバイスの取得に失敗しました")
