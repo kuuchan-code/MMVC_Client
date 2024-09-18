@@ -409,7 +409,8 @@ impl Sola {
         (0..crossfade_size)
             .map(|i| {
                 let t = i as f32 / (crossfade_size - 1) as f32;
-                let fade_in = 0.5 * (1.0 - (PI * t).cos());
+                // イージング関数を使用して滑らかなフェードを実現
+                let fade_in = t.powf(2.0) * (3.0 - 2.0 * t); // Smoothstep関数
                 let fade_out = 1.0 - fade_in;
                 prev_wav[i] * fade_out + cur_wav[i] * fade_in
             })
