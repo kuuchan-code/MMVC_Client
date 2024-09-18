@@ -297,7 +297,7 @@ fn play_output(
         10,
     )
     .unwrap();
-    let mut output_buffer: VecDeque<f32> = VecDeque::with_capacity(BUFFER_SIZE * 10);
+    let mut output_buffer: VecDeque<f32> = VecDeque::with_capacity(BUFFER_SIZE);
     let output_stream_config = output_config.config();
     let channels = output_config.channels() as usize;
 
@@ -475,8 +475,8 @@ fn main() -> OrtResult<()> {
     let output_device = select_device(host.output_devices().unwrap().collect(), "出力");
 
     // チャネルの作成
-    let (input_tx, input_rx) = bounded(10);
-    let (output_tx, output_rx) = bounded(10);
+    let (input_tx, input_rx) = bounded(0);
+    let (output_tx, output_rx) = bounded(0);
 
     // 入力ストリームの作成
     let input_stream = record_and_resample(Arc::clone(&hparams), input_device, input_tx);
