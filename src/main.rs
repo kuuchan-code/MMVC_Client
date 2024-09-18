@@ -1,3 +1,4 @@
+use anyhow::Result;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, StreamConfig};
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -10,9 +11,9 @@ use rustfft::{num_complex::Complex, FftPlanner};
 use speexdsp_resampler::State as SpeexResampler;
 use std::collections::VecDeque;
 use std::f32::consts::PI;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, Write};
 use std::sync::Arc;
-use std::thread;
+use std::{env, thread};
 
 const BUFFER_SIZE: usize = 8192; // バッファサイズ
 
@@ -47,7 +48,7 @@ fn processing_thread(
     session: Arc<Session>,
     input_rx: Receiver<Vec<f32>>,
     output_tx: Sender<Vec<f32>>,
-) {
+) -> Result<()> {
     let sola_search_frame = 1024;
     let overlap_size = 1024;
     let mut sola = Sola::new(overlap_size, sola_search_frame);
@@ -84,6 +85,7 @@ fn processing_thread(
             break;
         }
     }
+    Ok(())
 }
 
 /// 音声変換処理のメイン関数
@@ -113,13 +115,13 @@ fn audio_transform(hparams: &AudioParams, session: &Session, signal: &[f32]) -> 
     }
 
     let spec_lengths = Array1::from_elem(1, spec.shape()[2] as i64);
-    let sid_src = Array1::from_elem(1, hparams.source_speaker_id);
+    let source_speaker_id_src = Array1::from_elem(1, hparams.source_speaker_id);
 
     let audio_result = run_onnx_model_inference(
         session,
         &spec,
         &spec_lengths,
-        &sid_src,
+        &source_speaker_id_src,
         hparams.target_speaker_id,
     );
 
@@ -407,80 +409,127 @@ fn select_device(devices: Vec<Device>, label: &str) -> Device {
 }
 
 fn main() -> OrtResult<()> {
+    println!("プログラムを開始します");
+
+    // コマンドライン引数からONNXファイル名を取得
+    let args: Vec<String> = env::args().collect();
+    let onnx_file = if args.len() > 1 {
+        args[1].clone()
+    } else {
+        "G_best_denoise_runa.onnx".to_string() // デフォルトのONNXファイル名
+    };
+    println!("使用するONNXファイル: {}", onnx_file);
+
     // ユーザーにsource_speaker_idとtarget_speaker_idを入力させる
-    println!("Enter source speaker ID (sid): ");
-    let stdin = io::stdin();
-    let sid = stdin
-        .lock()
-        .lines()
-        .next()
-        .and_then(|line| line.ok())
-        .and_then(|input| input.trim().parse::<i64>().ok())
-        .expect("Invalid input for source speaker ID");
+    let source_speaker_id = read_input("ソーススピーカーIDを入力してください: ")
+        .expect("有効なソーススピーカーIDを入力してください");
+    let target_speaker_id = read_input("ターゲットスピーカーIDを入力してください: ")
+        .expect("有効なターゲットスピーカーIDを入力してください");
 
-    println!("Enter target speaker ID: ");
-    let target_speaker_id = stdin
-        .lock()
-        .lines()
-        .next()
-        .and_then(|line| line.ok())
-        .and_then(|input| input.trim().parse::<i64>().ok())
-        .expect("Invalid input for target speaker ID");
+    println!("ソーススピーカーID: {}", source_speaker_id);
+    println!("ターゲットスピーカーID: {}", target_speaker_id);
 
-    let hparams = Arc::new(AudioParams::new(sid, target_speaker_id));
+    let hparams = Arc::new(AudioParams::new(source_speaker_id, target_speaker_id));
 
     // 環境とセッションの構築
+    println!("ONNX Runtimeの環境を構築中...");
     let environment = Environment::builder()
         .with_name("MMVC_Client")
         .with_execution_providers([ExecutionProvider::CUDA(Default::default())])
         .build()?
         .into_arc();
 
+    println!("ONNX Runtimeセッションを構築中...");
     let session = Arc::new(
         SessionBuilder::new(&environment)?
             .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_model_from_file("G_best_denoise_runa.onnx")?,
+            .with_model_from_file(&onnx_file)?, // 指定されたONNXファイルを使用
     );
 
     // デバイス選択
+    println!("オーディオデバイスを取得中...");
     let host = cpal::default_host();
     let input_devices: Vec<Device> = host
         .input_devices()
-        .unwrap()
+        .expect("入力デバイスの取得に失敗しました")
         .filter(|d| d.name().is_ok())
         .collect();
     let output_devices: Vec<Device> = host
         .output_devices()
-        .unwrap()
+        .expect("出力デバイスの取得に失敗しました")
         .filter(|d| d.name().is_ok())
         .collect();
 
     let input_device = select_device(input_devices, "入力");
     let output_device = select_device(output_devices, "出力");
 
+    println!(
+        "選択された入力デバイス: {}",
+        input_device
+            .name()
+            .unwrap_or_else(|_| "Unknown".to_string())
+    );
+    println!(
+        "選択された出力デバイス: {}",
+        output_device
+            .name()
+            .unwrap_or_else(|_| "Unknown".to_string())
+    );
+
     // チャネルの作成
     let (input_tx, input_rx) = bounded::<Vec<f32>>(0);
     let (output_tx, output_rx) = bounded::<Vec<f32>>(0);
 
     // 入力ストリームの作成
+    println!("入力ストリームを作成中...");
     let input_stream = record_and_resample(Arc::clone(&hparams), input_device, input_tx);
 
     // 処理スレッドの開始
+    println!("処理スレッドを開始します...");
     let hparams_clone = Arc::clone(&hparams);
     let session_clone = Arc::clone(&session);
     thread::spawn(move || {
-        processing_thread(hparams_clone, session_clone, input_rx, output_tx);
+        if let Err(e) = processing_thread(hparams_clone, session_clone, input_rx, output_tx) {
+            eprintln!("処理スレッドでエラーが発生しました: {:?}", e);
+        }
     });
 
     // 出力ストリームの作成
+    println!("出力ストリームを作成中...");
     let output_stream = play_output(Arc::clone(&hparams), output_device, output_rx);
 
     // ストリームの開始
-    input_stream.play().unwrap();
-    output_stream.play().unwrap();
+    println!("入力ストリームを再生開始...");
+    input_stream
+        .play()
+        .expect("入力ストリームの再生に失敗しました");
+    println!("出力ストリームを再生開始...");
+    output_stream
+        .play()
+        .expect("出力ストリームの再生に失敗しました");
 
+    println!("プログラムが正常に起動しました。処理を続けています...");
     // メインスレッドをブロック
     loop {
         thread::sleep(std::time::Duration::from_millis(50));
     }
+}
+
+/// ユーザーからの入力を読み取る関数
+fn read_input(prompt: &str) -> Result<i64, String> {
+    let mut input = String::new();
+    print!("{}", prompt);
+    // プロンプトを即座に表示
+    io::stdout()
+        .flush()
+        .map_err(|_| "プロンプトのフラッシュに失敗しました".to_string())?;
+    // 入力を読み取る
+    io::stdin()
+        .read_line(&mut input)
+        .map_err(|_| "入力の読み取りに失敗しました".to_string())?;
+    // 入力を整数に変換
+    input
+        .trim()
+        .parse::<i64>()
+        .map_err(|_| "入力が整数ではありません".to_string())
 }
