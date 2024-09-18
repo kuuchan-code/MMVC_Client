@@ -416,7 +416,7 @@ fn main() -> OrtResult<()> {
     let onnx_file = if args.len() > 1 {
         args[1].clone()
     } else {
-        "G_best_denoise_runa.onnx".to_string() // デフォルトのONNXファイル名
+        "G_best.onnx".to_string() // デフォルトのONNXファイル名
     };
     println!("使用するONNXファイル: {}", onnx_file);
 
