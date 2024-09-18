@@ -14,7 +14,7 @@ use std::io;
 use std::sync::Arc;
 use std::thread;
 
-const BUFFER_SIZE: usize = 2048; // バッファサイズを増加
+const BUFFER_SIZE: usize = 8192; // バッファサイズを増加
 
 // ハイパーパラメータ構造体
 struct AudioParams {
@@ -48,7 +48,7 @@ fn processing_thread(
     input_rx: Receiver<Vec<f32>>,
     output_tx: Sender<Vec<f32>>,
 ) {
-    let sola_search_frame = 512;
+    let sola_search_frame = 1024;
     let overlap_size = 512;
     let mut sola = Sola::new(overlap_size, sola_search_frame);
     let mut prev_input_tail: Vec<f32> = Vec::new();
@@ -261,10 +261,14 @@ fn record_and_resample(
                     let chunk: Vec<f32> = buffer.drain(..BUFFER_SIZE).collect::<Vec<f32>>();
                     let mut resampled = vec![
                         0.0;
-                        chunk.len() * hparams.sample_rate as usize
-                            / input_sample_rate as usize
+                        (chunk.len() as f64 * hparams.sample_rate as f64 / input_sample_rate as f64)
+                            .ceil() as usize
                     ];
-                    let _ = resampler.process_float(0, &chunk, &mut resampled);
+                    // 実際のリサンプリングされたサンプル数を取得
+                    let (_, output_generated) =
+                        resampler.process_float(0, &chunk, &mut resampled).unwrap();
+                    // 実際にリサンプリングされた部分だけを使用
+                    resampled.truncate(output_generated);
 
                     if input_tx.send(resampled).is_err() {
                         break;
@@ -279,7 +283,6 @@ fn record_and_resample(
     stream
 }
 
-// 出力の再生
 fn play_output(
     hparams: Arc<AudioParams>,
     output_device: cpal::Device,
@@ -305,10 +308,16 @@ fn play_output(
                 while let Ok(processed_signal) = output_rx.try_recv() {
                     let mut resampled = vec![
                         0.0;
-                        processed_signal.len() * output_sample_rate as usize
-                            / hparams.sample_rate as usize
+                        (processed_signal.len() as f64 * output_sample_rate as f64
+                            / hparams.sample_rate as f64)
+                            .ceil() as usize
                     ];
-                    let _ = resampler.process_float(0, &processed_signal, &mut resampled);
+                    // 実際のリサンプリングされたサンプル数を取得
+                    let (_, output_generated) = resampler
+                        .process_float(0, &processed_signal, &mut resampled)
+                        .unwrap();
+                    // 実際にリサンプリングされた部分だけを使用
+                    resampled.truncate(output_generated);
                     output_buffer.extend(resampled.iter());
                 }
                 if output_buffer.len() < data.len() {
