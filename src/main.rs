@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::{env, thread};
 
 // 定数の定義
-const BUFFER_SIZE: usize = 4096;
+const BUFFER_SIZE: usize = 6144;
 
 // AudioParams構造体の定義
 struct AudioParams {
@@ -430,7 +430,7 @@ fn main() -> OrtResult<()> {
     println!("ONNX Runtimeの環境を構築中...");
     let environment = Environment::builder()
         .with_name("MMVC_Client")
-        .with_execution_providers([ExecutionProvider::CUDA(Default::default())])
+        .with_execution_providers([ExecutionProvider::TensorRT(Default::default())])
         .build()?
         .into_arc();
 
