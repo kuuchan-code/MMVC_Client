@@ -7,8 +7,8 @@ use ort::{
     tensor::OrtOwnedTensor, Environment, ExecutionProvider, GraphOptimizationLevel, OrtResult,
     Session, SessionBuilder, Value,
 };
-use rustfft::{num_complex::Complex, FftPlanner};
 use rustfft::num_traits::Zero; // Zeroトレイトをインポート
+use rustfft::{num_complex::Complex, FftPlanner};
 use speexdsp_resampler::State as SpeexResampler;
 use std::collections::VecDeque;
 use std::f32::consts::PI;
@@ -17,7 +17,7 @@ use std::sync::Arc;
 use std::{env, thread};
 
 // 定数の定義
-const BUFFER_SIZE: usize = 8192;
+const BUFFER_SIZE: usize = 4096;
 
 // AudioParams構造体の定義
 struct AudioParams {
@@ -67,7 +67,8 @@ fn processing_thread(
     while let Ok(mut input_signal) = input_rx.recv() {
         // 入力信号の前後処理
         if !prev_input_tail.is_empty() {
-            let mut extended_signal = Vec::with_capacity(prev_input_tail.len() + input_signal.len());
+            let mut extended_signal =
+                Vec::with_capacity(prev_input_tail.len() + input_signal.len());
             extended_signal.extend_from_slice(&prev_input_tail);
             extended_signal.extend_from_slice(&input_signal);
             input_signal = extended_signal;
@@ -103,10 +104,7 @@ fn audio_transform(hparams: &AudioParams, session: &Session, signal: &[f32]) -> 
     padded_signal.extend(vec![0.0; pad_size]);
 
     // STFTの適用
-    let mut spec = apply_stft_with_hann_window(
-        &padded_signal,
-        hparams,
-    );
+    let mut spec = apply_stft_with_hann_window(&padded_signal, hparams);
 
     // STFTパディングによる影響を削除
     let total_frames = spec.shape()[2];
@@ -175,10 +173,7 @@ fn run_onnx_model_inference(
 }
 
 // ハン窓を使用したSTFTの適用
-fn apply_stft_with_hann_window(
-    audio_signal: &[f32],
-    hparams: &AudioParams,
-) -> Array3<f32> {
+fn apply_stft_with_hann_window(audio_signal: &[f32], hparams: &AudioParams) -> Array3<f32> {
     let fft_size = hparams.fft_window_size;
     let hop_size = hparams.hop_size;
     let window = &hparams.hann_window;
@@ -224,7 +219,7 @@ fn record_and_resample(
         1,
         input_sample_rate as usize,
         hparams.sample_rate as usize,
-        10,
+        5,
     )
     .unwrap();
 
@@ -278,7 +273,7 @@ fn play_output(
         1,
         hparams.sample_rate as usize,
         output_sample_rate as usize,
-        10,
+        5,
     )
     .unwrap();
     let mut output_buffer: VecDeque<f32> = VecDeque::with_capacity(BUFFER_SIZE);
@@ -478,8 +473,8 @@ fn main() -> OrtResult<()> {
     );
 
     // チャネルの作成
-    let (input_tx, input_rx) = bounded::<Vec<f32>>(10);
-    let (output_tx, output_rx) = bounded::<Vec<f32>>(10);
+    let (input_tx, input_rx) = bounded::<Vec<f32>>(0);
+    let (output_tx, output_rx) = bounded::<Vec<f32>>(0);
 
     // 入力ストリームの作成
     println!("入力ストリームを作成中...");
