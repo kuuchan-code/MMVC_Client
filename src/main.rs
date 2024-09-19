@@ -7,6 +7,7 @@ use ort::{
     tensor::OrtOwnedTensor, Environment, ExecutionProvider, GraphOptimizationLevel, OrtResult,
     Session, SessionBuilder, Value,
 };
+use rustfft::Fft;
 use rustfft::{num_complex::Complex, FftPlanner};
 use speexdsp_resampler::State as SpeexResampler;
 use std::collections::VecDeque;
@@ -26,18 +27,31 @@ struct AudioParams {
     target_speaker_id: i64,
     dispose_stft_frames: usize,
     dispose_conv1d_samples: usize,
+    hann_window: Vec<f32>,
+    fft: Arc<dyn Fft<f32> + Send + Sync>,
 }
 
 impl AudioParams {
     fn new(source_speaker_id: i64, target_speaker_id: i64) -> Self {
+        let fft_window_size = 512;
+        let hann_window: Vec<f32> = (0..fft_window_size)
+            .map(|n| 0.5 * (1.0 - (2.0 * PI * n as f32 / fft_window_size as f32).cos()))
+            .collect();
+
+        let mut fft_planner = FftPlanner::<f32>::new();
+        let fft_instance = fft_planner.plan_fft_forward(fft_window_size);
+        let fft: Arc<dyn Fft<f32> + Send + Sync> = fft_instance;
+
         Self {
             sample_rate: 24000,
-            fft_window_size: 512,
+            fft_window_size,
             hop_size: 128,
             source_speaker_id,
             target_speaker_id,
             dispose_stft_frames: 0,
             dispose_conv1d_samples: 0,
+            hann_window,
+            fft,
         }
     }
 }
@@ -99,9 +113,7 @@ fn audio_transform(hparams: &AudioParams, session: &Session, signal: &[f32]) -> 
     // STFTの適用
     let mut spec = apply_stft_with_hann_window(
         &padded_signal,
-        hparams.fft_window_size,
-        hparams.hop_size,
-        hparams.fft_window_size,
+        hparams, // 修正
     );
 
     // STFTパディングによる影響を削除
@@ -175,16 +187,12 @@ fn run_onnx_model_inference(
 /// ハン窓を使用したSTFTの適用
 fn apply_stft_with_hann_window(
     audio_signal: &[f32],
-    fft_size: usize,
-    hop_size: usize,
-    window_size: usize,
+    hparams: &AudioParams, // AudioParamsを引数に追加
 ) -> Array3<f32> {
-    let hann_window: Vec<f32> = (0..window_size)
-        .map(|n| 0.5 * (1.0 - (2.0 * PI * n as f32 / window_size as f32).cos()))
-        .collect();
-
-    let mut fft_planner = FftPlanner::<f32>::new();
-    let fft = fft_planner.plan_fft_forward(fft_size);
+    let fft_size = hparams.fft_window_size;
+    let hop_size = hparams.hop_size;
+    let window = &hparams.hann_window;
+    let fft = Arc::clone(&hparams.fft);
 
     let num_frames = (audio_signal.len() - fft_size) / hop_size + 1;
     let mut spectrogram = Array3::<f32>::zeros((1, fft_size / 2 + 1, num_frames));
@@ -192,8 +200,8 @@ fn apply_stft_with_hann_window(
     for (i, frame) in audio_signal.windows(fft_size).step_by(hop_size).enumerate() {
         let mut complex_buffer: Vec<Complex<f32>> = frame
             .iter()
-            .zip(&hann_window)
-            .map(|(&sample, &window)| Complex::new(sample * window, 0.0))
+            .zip(window)
+            .map(|(&sample, &w)| Complex::new(sample * w, 0.0))
             .collect();
 
         fft.process(&mut complex_buffer);
