@@ -412,9 +412,6 @@ fn main() -> OrtResult<()> {
     let target_speaker_id = read_input("ターゲットスピーカーIDを入力してください: ")
         .expect("有効なターゲットスピーカーIDを入力してください");
 
-    println!("ソーススピーカーID: {}", source_speaker_id);
-    println!("ターゲットスピーカーID: {}", target_speaker_id);
-
     let hparams = Arc::new(AudioParams::new(source_speaker_id, target_speaker_id));
 
     // 環境とセッションの構築
