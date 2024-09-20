@@ -33,11 +33,18 @@ struct AudioParams {
     source_speaker_id: i64,
     target_speaker_id: i64,
     hann_window: Vec<f32>,
+    cutoff_enabled: bool,
+    cutoff_freq: f32,
 }
 
 // AudioParamsの実装
 impl AudioParams {
-    fn new(source_speaker_id: i64, target_speaker_id: i64) -> Self {
+    fn new(
+        source_speaker_id: i64,
+        target_speaker_id: i64,
+        cutoff_enabled: bool,
+        cutoff_freq: f32,
+    ) -> Self {
         let fft_window_size = 512;
         let hann_window: Vec<f32> = (0..fft_window_size)
             .map(|n| 0.5 * (1.0 - (2.0 * PI * n as f32 / fft_window_size as f32).cos()))
@@ -50,6 +57,8 @@ impl AudioParams {
             source_speaker_id,
             target_speaker_id,
             hann_window,
+            cutoff_enabled,
+            cutoff_freq,
         }
     }
 }
@@ -174,7 +183,7 @@ fn apply_stft_with_hann_window(audio_signal: &[f32], hparams: &AudioParams) -> A
 
     // 周波数解像度の計算
     let freq_resolution = hparams.sample_rate as f32 / fft_size as f32;
-    let cutoff_freq = 150.0;
+    let cutoff_freq = hparams.cutoff_freq;
     let cutoff_bin = (cutoff_freq / freq_resolution).ceil() as usize;
 
     for (i, frame) in audio_signal.windows(fft_size).step_by(hop_size).enumerate() {
@@ -188,8 +197,8 @@ fn apply_stft_with_hann_window(audio_signal: &[f32], hparams: &AudioParams) -> A
 
         // スペクトログラムの取得とフィルタリング
         for (j, bin) in input_buffer.iter().take(fft_size / 2 + 1).enumerate() {
-            if j < cutoff_bin {
-                spectrogram[[0, j, i]] = 0.0; // 150Hz以下をゼロに
+            if hparams.cutoff_enabled && j < cutoff_bin {
+                spectrogram[[0, j, i]] = 0.0; // カットオフが有効であり、カットオフ周波数以下の場合
             } else {
                 spectrogram[[0, j, i]] = bin.norm();
             }
@@ -430,8 +439,8 @@ fn main() -> Result<()> {
     // コマンドライン引数の定義
     let matches = Command::new(env!("CARGO_PKG_NAME"))
         .version(env!("CARGO_PKG_VERSION"))
-        .author("ku-chan")
-        .about("MMVC ClientのRust・Windows・TensorRT版")
+        .author(env!("CARGO_PKG_AUTHORS"))
+        .about(env!("CARGO_PKG_DESCRIPTION"))
         .arg(
             Arg::new("onnx")
                 .short('m')
@@ -475,6 +484,20 @@ fn main() -> Result<()> {
                 .help("出力オーディオデバイスの番号")
                 .value_parser(clap::value_parser!(usize)),
         )
+        .arg(
+            Arg::new("cutoff")
+                .long("cutoff")
+                .help("カットオフフィルターを有効にする")
+                .action(clap::ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("cutoff_freq")
+                .long("cutoff_freq")
+                .value_name("CUTOFF_FREQ")
+                .help("カットオフ周波数をHzで指定する（デフォルト: 150.0）")
+                .value_parser(clap::value_parser!(f32))
+                .default_value("150.0"),
+        )
         .get_matches();
 
     // 引数の取得
@@ -489,10 +512,27 @@ fn main() -> Result<()> {
         .expect("ターゲットスピーカーIDを指定してください");
     let input_device_arg: Option<usize> = matches.get_one::<usize>("input_device").copied();
     let output_device_arg: Option<usize> = matches.get_one::<usize>("output_device").copied();
+    let cutoff_enabled = matches.get_flag("cutoff");
+    let cutoff_freq: f32 = *matches
+        .get_one::<f32>("cutoff_freq")
+        .expect("cutoff_freqのデフォルト値が設定されていません");
 
     println!("使用するONNXファイル: {}", onnx_file);
+    println!(
+        "カットオフフィルター: {}",
+        if cutoff_enabled {
+            format!("有効 (周波数: {} Hz)", cutoff_freq)
+        } else {
+            "無効".to_string()
+        }
+    );
 
-    let hparams = Arc::new(AudioParams::new(source_speaker_id, target_speaker_id));
+    let hparams = Arc::new(AudioParams::new(
+        source_speaker_id,
+        target_speaker_id,
+        cutoff_enabled,
+        cutoff_freq,
+    ));
 
     // 環境とセッションの構築
     println!("ONNX Runtimeの環境を構築中...");
