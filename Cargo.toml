@@ -1,6 +1,8 @@
 [package]
 name = "mmvc_client"
 version = "0.1.0"
+authors = ["ku-chan"]
+description = "MMVC ClientのRust・Windows・TensorRT版"
 edition = "2021"
 
 [dependencies]

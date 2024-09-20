@@ -205,7 +205,8 @@ fn record_and_resample(
     input_device: Device,
     input_tx: Sender<Vec<f32>>,
 ) -> Result<cpal::Stream> {
-    let input_config = input_device.default_input_config()
+    let input_config = input_device
+        .default_input_config()
         .context("入力デバイスのデフォルト設定を取得できませんでした")?;
     let channels = input_config.channels() as usize;
     let input_sample_rate = input_config.sample_rate().0;
@@ -214,7 +215,8 @@ fn record_and_resample(
         input_sample_rate as usize,
         hparams.sample_rate as usize,
         5,
-    ).map_err(|e| anyhow::anyhow!("リサンプラーの初期化に失敗しました: {:?}", e))?;
+    )
+    .map_err(|e| anyhow::anyhow!("リサンプラーの初期化に失敗しました: {:?}", e))?;
 
     let input_stream_config: StreamConfig = input_config.into();
     let mut buffer = Vec::new();
@@ -238,7 +240,8 @@ fn record_and_resample(
                         .ceil() as usize
                 ];
                 // リサンプリング
-                if let Ok((_, output_generated)) = resampler.process_float(0, &chunk, &mut resampled) {
+                if let Ok((_, output_generated)) = resampler.process_float(0, &chunk, &mut resampled)
+                {
                     resampled.truncate(output_generated);
                     if input_tx.send(resampled).is_err() {
                         break;
@@ -251,7 +254,8 @@ fn record_and_resample(
         },
         move |err| eprintln!("入力ストリームエラー: {}", err),
         None,
-    ).context("入力ストリームの構築に失敗しました")?;
+    )
+    .context("入力ストリームの構築に失敗しました")?;
 
     Ok(stream)
 }
@@ -262,7 +266,8 @@ fn play_output(
     output_device: Device,
     output_rx: Receiver<Vec<f32>>,
 ) -> Result<cpal::Stream> {
-    let output_config = output_device.default_output_config()
+    let output_config = output_device
+        .default_output_config()
         .context("出力デバイスのデフォルト設定を取得できませんでした")?;
     let output_sample_rate = output_config.sample_rate().0;
     let input_sample_rate = hparams.sample_rate;
@@ -275,7 +280,8 @@ fn play_output(
         hparams.sample_rate as usize,
         output_sample_rate as usize,
         5,
-    ).map_err(|e| anyhow::anyhow!("リサンプラーの初期化に失敗しました: {:?}", e))?;
+    )
+    .map_err(|e| anyhow::anyhow!("リサンプラーの初期化に失敗しました: {:?}", e))?;
     let mut output_buffer: VecDeque<f32> = VecDeque::with_capacity(max_buffer_size);
     let output_stream_config = output_config.config();
     let channels = output_config.channels() as usize;
@@ -310,7 +316,8 @@ fn play_output(
         },
         move |err| eprintln!("出力ストリームエラー: {}", err),
         None,
-    ).context("出力ストリームの構築に失敗しました")?;
+    )
+    .context("出力ストリームの構築に失敗しました")?;
 
     Ok(stream)
 }
@@ -405,7 +412,10 @@ fn select_device(devices: &[Device], label: &str) -> Result<Device> {
         .context("入力の取得に失敗しました")?
         .context("入力の読み取りに失敗しました")?;
 
-    let index: usize = input.trim().parse().context("有効なデバイス番号を入力してください")?;
+    let index: usize = input
+        .trim()
+        .parse()
+        .context("有効なデバイス番号を入力してください")?;
     devices
         .get(index)
         .cloned()
@@ -418,18 +428,18 @@ fn main() -> Result<()> {
     env_logger::init();
 
     // コマンドライン引数の定義
-    let matches = Command::new("Audio Processor")
-        .version("1.0")
-        .author("Your Name <you@example.com>")
-        .about("リアルタイム音声処理アプリケーション")
+    let matches = Command::new(env!("CARGO_PKG_NAME"))
+        .version(env!("CARGO_PKG_VERSION"))
+        .author("ku-chan")
+        .about("MMVC ClientのRust・Windows・TensorRT版")
         .arg(
             Arg::new("onnx")
                 .short('m')
                 .long("model")
                 .value_name("ONNX_FILE")
                 .help("使用するONNXファイルのパス")
-                .default_value("./logs/denoise_runa/G_best.onnx")
-                .value_parser(clap::value_parser!(String)),
+                .value_parser(clap::value_parser!(String))
+                .required(true),
         )
         .arg(
             Arg::new("source_id")
@@ -468,9 +478,15 @@ fn main() -> Result<()> {
         .get_matches();
 
     // 引数の取得
-    let onnx_file = matches.get_one::<String>("onnx").unwrap();
-    let source_speaker_id: i64 = *matches.get_one::<i64>("source_id").unwrap();
-    let target_speaker_id: i64 = *matches.get_one::<i64>("target_id").unwrap();
+    let onnx_file = matches
+        .get_one::<String>("onnx")
+        .expect("ONNXファイルを指定してください");
+    let source_speaker_id: i64 = *matches
+        .get_one::<i64>("source_id")
+        .expect("ソーススピーカーIDを指定してください");
+    let target_speaker_id: i64 = *matches
+        .get_one::<i64>("target_id")
+        .expect("ターゲットスピーカーIDを指定してください");
     let input_device_arg: Option<usize> = matches.get_one::<usize>("input_device").copied();
     let output_device_arg: Option<usize> = matches.get_one::<usize>("output_device").copied();
 
@@ -565,9 +581,14 @@ fn main() -> Result<()> {
             let success = unsafe { SetThreadPriority(current_thread, THREAD_PRIORITY_TIME_CRITICAL) };
             match success {
                 Ok(_) => {
-                    println!("処理スレッドの優先度を THREAD_PRIORITY_TIME_CRITICAL に設定しました。")
+                    println!(
+                        "処理スレッドの優先度を THREAD_PRIORITY_TIME_CRITICAL に設定しました。"
+                    )
                 }
-                Err(e) => eprintln!("処理スレッドの優先度設定に失敗しました。エラー: {:?}", e),
+                Err(e) => eprintln!(
+                    "処理スレッドの優先度設定に失敗しました。エラー: {:?}",
+                    e
+                ),
             }
         }
 
