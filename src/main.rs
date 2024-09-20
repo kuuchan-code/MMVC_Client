@@ -15,7 +15,9 @@ use std::f32::consts::PI;
 use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 use std::{env, thread};
-
+use windows::Win32::System::Threading::{
+    GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL,
+};
 // 定数の定義
 const BUFFER_SIZE: usize = 6144;
 
@@ -26,8 +28,6 @@ struct AudioParams {
     hop_size: usize,
     source_speaker_id: i64,
     target_speaker_id: i64,
-    dispose_stft_frames: usize,
-    dispose_conv1d_samples: usize,
     hann_window: Vec<f32>,
 }
 
@@ -45,8 +45,6 @@ impl AudioParams {
             hop_size: 128,
             source_speaker_id,
             target_speaker_id,
-            dispose_stft_frames: 0,
-            dispose_conv1d_samples: 0,
             hann_window,
         }
     }
@@ -81,9 +79,7 @@ fn processing_thread(
         let merged_signal = sola.merge(&processed_signal);
 
         // 次回のために入力の終端を保持
-        let dispose_length = (hparams.dispose_stft_frames * hparams.hop_size)
-            + hparams.dispose_conv1d_samples
-            + overlap_size;
+        let dispose_length = overlap_size;
         let tail_len = input_signal.len().min(dispose_length);
         prev_input_tail = input_signal[input_signal.len() - tail_len..].to_vec();
 
@@ -104,17 +100,7 @@ fn audio_transform(hparams: &AudioParams, session: &Session, signal: &[f32]) -> 
     padded_signal.extend(vec![0.0; pad_size]);
 
     // STFTの適用
-    let mut spec = apply_stft_with_hann_window(&padded_signal, hparams);
-
-    // STFTパディングによる影響を削除
-    let total_frames = spec.shape()[2];
-    let dispose_frames = hparams.dispose_stft_frames;
-
-    if total_frames > 2 * dispose_frames {
-        let start = dispose_frames;
-        let end = total_frames - dispose_frames;
-        spec = spec.slice(ndarray::s![.., .., start..end]).to_owned();
-    }
+    let spec = apply_stft_with_hann_window(&padded_signal, hparams);
 
     let spec_lengths = Array1::from_elem(1, spec.shape()[2] as i64);
     let source_speaker_id_src = Array1::from_elem(1, hparams.source_speaker_id);
@@ -127,18 +113,10 @@ fn audio_transform(hparams: &AudioParams, session: &Session, signal: &[f32]) -> 
         hparams.target_speaker_id,
     );
 
-    let mut audio = match audio_result {
+    let audio = match audio_result {
         Some(a) => a,
         None => return vec![0.0; signal.len()],
     };
-
-    // Conv1Dパディングによる影響を削除
-    let dispose_samples = hparams.dispose_conv1d_samples;
-    if audio.len() > 2 * dispose_samples {
-        let start = dispose_samples;
-        let end = audio.len() - dispose_samples;
-        audio = audio[start..end].to_vec();
-    }
 
     audio
 }
@@ -214,7 +192,6 @@ fn apply_stft_with_hann_window(audio_signal: &[f32], hparams: &AudioParams) -> A
 
     spectrogram
 }
-
 
 // 音声の録音とリサンプリングを行う関数
 fn record_and_resample(
@@ -414,7 +391,16 @@ fn select_device(devices: Vec<Device>, label: &str) -> Device {
 }
 
 fn main() -> OrtResult<()> {
-    println!("プログラムを開始します");
+    // 現在のスレッドの優先度を最高に設定
+    let current_thread = unsafe { GetCurrentThread() };
+
+    // スレッド優先度を TimeCritical に設定
+    let success = unsafe { SetThreadPriority(current_thread, THREAD_PRIORITY_TIME_CRITICAL) };
+
+    match success {
+        Ok(_) => println!("スレッド優先度を THREAD_PRIORITY_TIME_CRITICAL に設定しました。"),
+        Err(e) => eprintln!("スレッド優先度の設定に失敗しました。エラー: {:?}", e),
+    }
 
     // コマンドライン引数からONNXファイル名を取得
     let args: Vec<String> = env::args().collect();
