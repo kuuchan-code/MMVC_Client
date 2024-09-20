@@ -23,13 +23,14 @@ use windows::Win32::System::Threading::{
 };
 
 // 定数の定義
-const BUFFER_SIZE: usize = 6144;
+const FFT_WINDOW_SIZE: usize = 512;
+const HOP_SIZE: usize = 128;
 
 // AudioParams構造体の定義
 struct AudioParams {
-    sample_rate: u32,
-    fft_window_size: usize,
-    hop_size: usize,
+    model_sample_rate: u32, // サンプルレートはモデルへの入力用
+    buffer_size: usize,
+    overlap_length: usize,
     source_speaker_id: i64,
     target_speaker_id: i64,
     hann_window: Vec<f32>,
@@ -40,20 +41,22 @@ struct AudioParams {
 // AudioParamsの実装
 impl AudioParams {
     fn new(
+        model_sample_rate: u32,
+        buffer_size: usize,
+        overlap_length: usize,
         source_speaker_id: i64,
         target_speaker_id: i64,
         cutoff_enabled: bool,
         cutoff_freq: f32,
     ) -> Self {
-        let fft_window_size = 512;
-        let hann_window: Vec<f32> = (0..fft_window_size)
-            .map(|n| 0.5 * (1.0 - (2.0 * PI * n as f32 / fft_window_size as f32).cos()))
+        let hann_window: Vec<f32> = (0..FFT_WINDOW_SIZE)
+            .map(|n| 0.5 * (1.0 - (2.0 * PI * n as f32 / FFT_WINDOW_SIZE as f32).cos()))
             .collect();
 
         Self {
-            sample_rate: 24000,
-            fft_window_size,
-            hop_size: 128,
+            model_sample_rate,
+            buffer_size,
+            overlap_length,
             source_speaker_id,
             target_speaker_id,
             hann_window,
@@ -70,8 +73,9 @@ fn processing_thread(
     input_rx: Receiver<Vec<f32>>,
     output_tx: Sender<Vec<f32>>,
 ) -> Result<()> {
-    let sola_search_frame = 1024;
-    let overlap_size = 1024;
+    // Set sola_search_frame equal to overlap_length
+    let sola_search_frame = hparams.overlap_length;
+    let overlap_size = hparams.overlap_length;
     let mut sola = Sola::new(overlap_size, sola_search_frame);
     let mut prev_input_tail: Vec<f32> = Vec::new();
 
@@ -109,7 +113,7 @@ fn processing_thread(
 // 音声変換処理のメイン関数
 fn audio_transform(hparams: &AudioParams, session: &Session, signal: &[f32]) -> Vec<f32> {
     // STFTパディングの追加
-    let pad_size = (hparams.fft_window_size - hparams.hop_size) / 2;
+    let pad_size = (FFT_WINDOW_SIZE - HOP_SIZE) / 2;
     let mut padded_signal = vec![0.0; pad_size];
     padded_signal.extend_from_slice(signal);
     padded_signal.extend(vec![0.0; pad_size]);
@@ -167,8 +171,8 @@ fn run_onnx_model_inference(
 
 // ハン窓を使用したSTFTの適用
 fn apply_stft_with_hann_window(audio_signal: &[f32], hparams: &AudioParams) -> Array3<f32> {
-    let fft_size = hparams.fft_window_size;
-    let hop_size = hparams.hop_size;
+    let fft_size = FFT_WINDOW_SIZE;
+    let hop_size = HOP_SIZE;
     let window = &hparams.hann_window;
     let num_frames = (audio_signal.len() - fft_size) / hop_size + 1;
     let mut spectrogram = Array3::<f32>::zeros((1, fft_size / 2 + 1, num_frames));
@@ -182,7 +186,7 @@ fn apply_stft_with_hann_window(audio_signal: &[f32], hparams: &AudioParams) -> A
     let mut scratch_buffer = vec![Complex::zero(); fft.get_inplace_scratch_len()];
 
     // 周波数解像度の計算
-    let freq_resolution = hparams.sample_rate as f32 / fft_size as f32;
+    let freq_resolution = hparams.model_sample_rate as f32 / fft_size as f32;
     let cutoff_freq = hparams.cutoff_freq;
     let cutoff_bin = (cutoff_freq / freq_resolution).ceil() as usize;
 
@@ -222,13 +226,15 @@ fn record_and_resample(
     let mut resampler = SpeexResampler::new(
         1,
         input_sample_rate as usize,
-        hparams.sample_rate as usize,
+        hparams.model_sample_rate as usize,
         5,
     )
-    .map_err(|e| anyhow::anyhow!("リサンプラーの初期化に失敗しました: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("リサンプリザーの初期化に失敗しました: {:?}", e))?;
 
     let input_stream_config: StreamConfig = input_config.into();
     let mut buffer = Vec::new();
+
+    let buffer_size = hparams.buffer_size;
 
     let stream = input_device
         .build_input_stream(
@@ -242,11 +248,12 @@ fn record_and_resample(
 
                 buffer.extend_from_slice(&mono_signal);
 
-                while buffer.len() >= BUFFER_SIZE {
-                    let chunk = buffer.drain(..BUFFER_SIZE).collect::<Vec<f32>>();
+                while buffer.len() >= buffer_size {
+                    let chunk = buffer.drain(..buffer_size).collect::<Vec<f32>>();
                     let mut resampled = vec![
                         0.0;
-                        (chunk.len() as f64 * hparams.sample_rate as f64 / input_sample_rate as f64)
+                        (chunk.len() as f64 * hparams.model_sample_rate as f64
+                            / input_sample_rate as f64)
                             .ceil() as usize
                     ];
                     // リサンプリング
@@ -281,18 +288,18 @@ fn play_output(
         .default_output_config()
         .context("出力デバイスのデフォルト設定を取得できませんでした")?;
     let output_sample_rate = output_config.sample_rate().0;
-    let input_sample_rate = hparams.sample_rate;
-    let resampling_ratio = output_sample_rate as f64 / input_sample_rate as f64;
+    let model_sample_rate = hparams.model_sample_rate;
+    let resampling_ratio = output_sample_rate as f64 / model_sample_rate as f64;
 
     // リサンプリング後の最大バッファサイズを計算
-    let max_buffer_size = (BUFFER_SIZE as f64 * resampling_ratio).ceil() as usize;
+    let max_buffer_size = (hparams.buffer_size as f64 * resampling_ratio).ceil() as usize;
     let mut resampler = SpeexResampler::new(
         1,
-        hparams.sample_rate as usize,
+        model_sample_rate as usize,
         output_sample_rate as usize,
         5,
     )
-    .map_err(|e| anyhow::anyhow!("リサンプラーの初期化に失敗しました: {:?}", e))?;
+    .map_err(|e| anyhow::anyhow!("リサンプリザーの初期化に失敗しました: {:?}", e))?;
     let mut output_buffer: VecDeque<f32> = VecDeque::with_capacity(max_buffer_size);
     let output_stream_config = output_config.config();
     let channels = output_config.channels() as usize;
@@ -503,6 +510,34 @@ fn main() -> Result<()> {
                 .value_parser(clap::value_parser!(f32))
                 .default_value("150.0"),
         )
+        // 新しい引数を追加
+        .arg(
+            Arg::new("model_sample_rate")
+                .short('r')
+                .long("model_sample_rate")
+                .value_name("MODEL_SAMPLE_RATE")
+                .help("モデルへ入力するオーディオのサンプルレートを指定する（デフォルト: 24000）")
+                .value_parser(clap::value_parser!(u32))
+                .default_value("24000"),
+        )
+        .arg(
+            Arg::new("buffer_size")
+                .short('b')
+                .long("buffer_size")
+                .value_name("BUFFER_SIZE")
+                .help("バッファサイズを指定する（デフォルト: 6144）")
+                .value_parser(clap::value_parser!(usize))
+                .default_value("6144"),
+        )
+        .arg(
+            Arg::new("overlap_length")
+                .short('l')
+                .long("overlap_length")
+                .value_name("OVERLAP_LENGTH")
+                .help("SOLAアルゴリズムのオーバーラップ長を指定する（デフォルト: 1024）")
+                .value_parser(clap::value_parser!(usize))
+                .default_value("1024"),
+        )
         .get_matches();
 
     // 引数の取得
@@ -521,6 +556,15 @@ fn main() -> Result<()> {
     let cutoff_freq: f32 = *matches
         .get_one::<f32>("cutoff_freq")
         .expect("cutoff_freqのデフォルト値が設定されていません");
+    let model_sample_rate: u32 = *matches
+        .get_one::<u32>("model_sample_rate")
+        .expect("model_sample_rateのデフォルト値が設定されていません");
+    let buffer_size: usize = *matches
+        .get_one::<usize>("buffer_size")
+        .expect("buffer_sizeのデフォルト値が設定されていません");
+    let overlap_length: usize = *matches
+        .get_one::<usize>("overlap_length")
+        .expect("overlap_lengthのデフォルト値が設定されていません");
 
     println!("使用するONNXファイル: {}", onnx_file);
     println!(
@@ -531,8 +575,14 @@ fn main() -> Result<()> {
             "無効".to_string()
         }
     );
+    println!("モデルのサンプルレート: {} Hz", model_sample_rate);
+    println!("バッファサイズ: {}", buffer_size);
+    println!("オーバーラップ長: {}", overlap_length);
 
     let hparams = Arc::new(AudioParams::new(
+        model_sample_rate,
+        buffer_size,
+        overlap_length,
         source_speaker_id,
         target_speaker_id,
         cutoff_enabled,
