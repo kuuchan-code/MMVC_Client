@@ -1,23 +1,27 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, StreamConfig};
+use clap::{Arg, Command};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use ndarray::{Array1, Array3, CowArray};
 use ort::{
-    tensor::OrtOwnedTensor, Environment, ExecutionProvider, GraphOptimizationLevel, OrtResult,
-    Session, SessionBuilder, Value,
+    tensor::OrtOwnedTensor, Environment, ExecutionProvider, GraphOptimizationLevel, Session,
+    SessionBuilder, Value,
 };
-use rustfft::num_traits::Zero; // Zeroトレイトをインポート
+use rustfft::num_traits::Zero;
 use rustfft::{num_complex::Complex, FftPlanner};
 use speexdsp_resampler::State as SpeexResampler;
 use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::io::{self, BufRead, Write};
 use std::sync::Arc;
-use std::{env, thread};
+use std::thread;
+
+#[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::{
     GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL,
 };
+
 // 定数の定義
 const BUFFER_SIZE: usize = 6144;
 
@@ -79,7 +83,11 @@ fn processing_thread(
         let merged_signal = sola.merge(&processed_signal);
 
         // 次回のために入力の終端を保持
-        prev_input_tail = input_signal[input_signal.len() - overlap_size..].to_vec();
+        if input_signal.len() >= overlap_size {
+            prev_input_tail = input_signal[input_signal.len() - overlap_size..].to_vec();
+        } else {
+            prev_input_tail = input_signal.clone();
+        }
 
         // マージした信号を送信
         if output_tx.send(merged_signal).is_err() {
@@ -196,8 +204,9 @@ fn record_and_resample(
     hparams: Arc<AudioParams>,
     input_device: Device,
     input_tx: Sender<Vec<f32>>,
-) -> cpal::Stream {
-    let input_config = input_device.default_input_config().unwrap();
+) -> Result<cpal::Stream> {
+    let input_config = input_device.default_input_config()
+        .context("入力デバイスのデフォルト設定を取得できませんでした")?;
     let channels = input_config.channels() as usize;
     let input_sample_rate = input_config.sample_rate().0;
     let mut resampler = SpeexResampler::new(
@@ -205,45 +214,46 @@ fn record_and_resample(
         input_sample_rate as usize,
         hparams.sample_rate as usize,
         5,
-    )
-    .unwrap();
+    ).map_err(|e| anyhow::anyhow!("リサンプラーの初期化に失敗しました: {:?}", e))?;
 
     let input_stream_config: StreamConfig = input_config.into();
     let mut buffer = Vec::new();
 
-    input_device
-        .build_input_stream(
-            &input_stream_config,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                // モノラル化
-                let mono_signal: Vec<f32> = data
-                    .chunks(channels)
-                    .map(|chunk| chunk.iter().sum::<f32>() / channels as f32)
-                    .collect();
+    let stream = input_device.build_input_stream(
+        &input_stream_config,
+        move |data: &[f32], _: &cpal::InputCallbackInfo| {
+            // モノラル化
+            let mono_signal: Vec<f32> = data
+                .chunks(channels)
+                .map(|chunk| chunk.iter().sum::<f32>() / channels as f32)
+                .collect();
 
-                buffer.extend_from_slice(&mono_signal);
+            buffer.extend_from_slice(&mono_signal);
 
-                while buffer.len() >= BUFFER_SIZE {
-                    let chunk = buffer.drain(..BUFFER_SIZE).collect::<Vec<f32>>();
-                    let mut resampled = vec![
-                        0.0;
-                        (chunk.len() as f64 * hparams.sample_rate as f64 / input_sample_rate as f64)
-                            .ceil() as usize
-                    ];
-                    // リサンプリング
-                    let (_, output_generated) =
-                        resampler.process_float(0, &chunk, &mut resampled).unwrap();
+            while buffer.len() >= BUFFER_SIZE {
+                let chunk = buffer.drain(..BUFFER_SIZE).collect::<Vec<f32>>();
+                let mut resampled = vec![
+                    0.0;
+                    (chunk.len() as f64 * hparams.sample_rate as f64 / input_sample_rate as f64)
+                        .ceil() as usize
+                ];
+                // リサンプリング
+                if let Ok((_, output_generated)) = resampler.process_float(0, &chunk, &mut resampled) {
                     resampled.truncate(output_generated);
-
                     if input_tx.send(resampled).is_err() {
                         break;
                     }
+                } else {
+                    eprintln!("リサンプリングに失敗しました");
+                    break;
                 }
-            },
-            move |err| eprintln!("Input stream error: {}", err),
-            None,
-        )
-        .unwrap()
+            }
+        },
+        move |err| eprintln!("入力ストリームエラー: {}", err),
+        None,
+    ).context("入力ストリームの構築に失敗しました")?;
+
+    Ok(stream)
 }
 
 // 出力を再生する関数
@@ -251,8 +261,9 @@ fn play_output(
     hparams: Arc<AudioParams>,
     output_device: Device,
     output_rx: Receiver<Vec<f32>>,
-) -> cpal::Stream {
-    let output_config = output_device.default_output_config().unwrap();
+) -> Result<cpal::Stream> {
+    let output_config = output_device.default_output_config()
+        .context("出力デバイスのデフォルト設定を取得できませんでした")?;
     let output_sample_rate = output_config.sample_rate().0;
     let input_sample_rate = hparams.sample_rate;
     let resampling_ratio = output_sample_rate as f64 / input_sample_rate as f64;
@@ -264,42 +275,44 @@ fn play_output(
         hparams.sample_rate as usize,
         output_sample_rate as usize,
         5,
-    )
-    .unwrap();
+    ).map_err(|e| anyhow::anyhow!("リサンプラーの初期化に失敗しました: {:?}", e))?;
     let mut output_buffer: VecDeque<f32> = VecDeque::with_capacity(max_buffer_size);
     let output_stream_config = output_config.config();
     let channels = output_config.channels() as usize;
 
-    output_device
-        .build_output_stream(
-            &output_stream_config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-                // 出力データを取得
-                while let Ok(processed_signal) = output_rx.try_recv() {
-                    let mut resampled = vec![
-                        0.0;
-                        (processed_signal.len() as f64 * resampling_ratio).ceil()
-                            as usize
-                    ];
-                    let (_, output_generated) = resampler
-                        .process_float(0, &processed_signal, &mut resampled)
-                        .unwrap();
+    let stream = output_device.build_output_stream(
+        &output_stream_config,
+        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            // 出力データを取得
+            while let Ok(processed_signal) = output_rx.try_recv() {
+                let mut resampled = vec![
+                    0.0;
+                    (processed_signal.len() as f64 * resampling_ratio).ceil()
+                        as usize
+                ];
+                if let Ok((_, output_generated)) =
+                    resampler.process_float(0, &processed_signal, &mut resampled)
+                {
                     resampled.truncate(output_generated);
                     output_buffer.extend(resampled);
+                } else {
+                    eprintln!("リサンプリングに失敗しました");
                 }
+            }
 
-                // 出力バッファからデータを供給
-                for frame in data.chunks_mut(channels) {
-                    let sample = output_buffer.pop_front().unwrap_or(0.0);
-                    for channel in frame.iter_mut() {
-                        *channel = sample;
-                    }
+            // 出力バッファからデータを供給
+            for frame in data.chunks_mut(channels) {
+                let sample = output_buffer.pop_front().unwrap_or(0.0);
+                for channel in frame.iter_mut() {
+                    *channel = sample;
                 }
-            },
-            move |err| eprintln!("Output stream error: {}", err),
-            None,
-        )
-        .unwrap()
+            }
+        },
+        move |err| eprintln!("出力ストリームエラー: {}", err),
+        None,
+    ).context("出力ストリームの構築に失敗しました")?;
+
+    Ok(stream)
 }
 
 // SOLAアルゴリズムの実装
@@ -375,40 +388,93 @@ impl Sola {
 }
 
 // デバイス選択のための関数
-fn select_device(devices: Vec<Device>, label: &str) -> Device {
-    println!("{} デバイスを選択してください:", label);
+fn select_device(devices: &[Device], label: &str) -> Result<Device> {
+    println!("{} デバイス:", label);
     for (i, device) in devices.iter().enumerate() {
-        println!("{}: {}", i, device.name().unwrap_or_default());
+        println!("  {}: {}", i, device.name().unwrap_or_default());
     }
+
     let stdin = io::stdin();
-    let index = stdin
+    print!("{}デバイスの番号を選択してください: ", label);
+    io::stdout().flush().context("プロンプトのフラッシュに失敗しました")?;
+
+    let input = stdin
         .lock()
         .lines()
         .next()
-        .and_then(|line| line.ok())
-        .and_then(|input| input.trim().parse::<usize>().ok())
-        .unwrap_or(0);
+        .context("入力の取得に失敗しました")?
+        .context("入力の読み取りに失敗しました")?;
+
+    let index: usize = input.trim().parse().context("有効なデバイス番号を入力してください")?;
     devices
-        .into_iter()
-        .nth(index)
-        .expect("選択されたデバイスが存在しません。")
+        .get(index)
+        .cloned()
+        .with_context(|| format!("デバイス番号 {} は存在しません", index))
 }
 
-fn main() -> OrtResult<()> {
-    // コマンドライン引数からONNXファイル名を取得
-    let args: Vec<String> = env::args().collect();
-    let onnx_file = if args.len() > 1 {
-        args[1].clone()
-    } else {
-        "G_best.onnx".to_string()
-    };
-    println!("使用するONNXファイル: {}", onnx_file);
+// メイン関数
+fn main() -> Result<()> {
+    // ロガーの初期化
+    env_logger::init();
 
-    // ユーザーにsource_speaker_idとtarget_speaker_idを入力させる
-    let source_speaker_id = read_input("ソーススピーカーIDを入力してください: ")
-        .expect("有効なソーススピーカーIDを入力してください");
-    let target_speaker_id = read_input("ターゲットスピーカーIDを入力してください: ")
-        .expect("有効なターゲットスピーカーIDを入力してください");
+    // コマンドライン引数の定義
+    let matches = Command::new("Audio Processor")
+        .version("1.0")
+        .author("Your Name <you@example.com>")
+        .about("リアルタイム音声処理アプリケーション")
+        .arg(
+            Arg::new("onnx")
+                .short('m')
+                .long("model")
+                .value_name("ONNX_FILE")
+                .help("使用するONNXファイルのパス")
+                .default_value("./logs/denoise_runa/G_best.onnx")
+                .value_parser(clap::value_parser!(String)),
+        )
+        .arg(
+            Arg::new("source_id")
+                .short('s')
+                .long("source")
+                .value_name("SOURCE_ID")
+                .help("ソーススピーカーID")
+                .required(true)
+                .value_parser(clap::value_parser!(i64)),
+        )
+        .arg(
+            Arg::new("target_id")
+                .short('t')
+                .long("target")
+                .value_name("TARGET_ID")
+                .help("ターゲットスピーカーID")
+                .required(true)
+                .value_parser(clap::value_parser!(i64)),
+        )
+        .arg(
+            Arg::new("input_device")
+                .short('i')
+                .long("input")
+                .value_name("INPUT_DEVICE")
+                .help("入力オーディオデバイスの番号")
+                .value_parser(clap::value_parser!(usize)),
+        )
+        .arg(
+            Arg::new("output_device")
+                .short('o')
+                .long("output")
+                .value_name("OUTPUT_DEVICE")
+                .help("出力オーディオデバイスの番号")
+                .value_parser(clap::value_parser!(usize)),
+        )
+        .get_matches();
+
+    // 引数の取得
+    let onnx_file = matches.get_one::<String>("onnx").unwrap();
+    let source_speaker_id: i64 = *matches.get_one::<i64>("source_id").unwrap();
+    let target_speaker_id: i64 = *matches.get_one::<i64>("target_id").unwrap();
+    let input_device_arg: Option<usize> = matches.get_one::<usize>("input_device").copied();
+    let output_device_arg: Option<usize> = matches.get_one::<usize>("output_device").copied();
+
+    println!("使用するONNXファイル: {}", onnx_file);
 
     let hparams = Arc::new(AudioParams::new(source_speaker_id, target_speaker_id));
 
@@ -417,14 +483,18 @@ fn main() -> OrtResult<()> {
     let environment = Environment::builder()
         .with_name("MMVC_Client")
         .with_execution_providers([ExecutionProvider::TensorRT(Default::default())])
-        .build()?
+        .build()
+        .context("ONNX Runtimeの環境構築に失敗しました")?
         .into_arc();
 
     println!("ONNX Runtimeセッションを構築中...");
     let session = Arc::new(
-        SessionBuilder::new(&environment)?
-            .with_optimization_level(GraphOptimizationLevel::Level3)?
-            .with_model_from_file(&onnx_file)?,
+        SessionBuilder::new(&environment)
+            .context("ONNX Runtimeセッションビルダーの作成に失敗しました")?
+            .with_optimization_level(GraphOptimizationLevel::Level3)
+            .context("ONNX Runtimeの最適化レベル設定に失敗しました")?
+            .with_model_from_file(&onnx_file)
+            .context("ONNXモデルの読み込みに失敗しました")?,
     );
 
     // デバイス選択
@@ -433,17 +503,34 @@ fn main() -> OrtResult<()> {
 
     let input_devices: Vec<Device> = host
         .input_devices()
-        .expect("入力デバイスの取得に失敗しました")
+        .context("入力デバイスの取得に失敗しました")?
         .filter(|d| d.name().is_ok())
         .collect();
     let output_devices: Vec<Device> = host
         .output_devices()
-        .expect("出力デバイスの取得に失敗しました")
+        .context("出力デバイスの取得に失敗しました")?
         .filter(|d| d.name().is_ok())
         .collect();
 
-    let input_device = select_device(input_devices, "入力");
-    let output_device = select_device(output_devices, "出力");
+    let input_device = if let Some(index) = input_device_arg {
+        input_devices
+            .get(index)
+            .cloned()
+            .with_context(|| format!("入力デバイス番号 {} は存在しません", index))?
+    } else {
+        select_device(&input_devices, "入力")
+            .context("入力デバイスの選択に失敗しました")?
+    };
+
+    let output_device = if let Some(index) = output_device_arg {
+        output_devices
+            .get(index)
+            .cloned()
+            .with_context(|| format!("出力デバイス番号 {} は存在しません", index))?
+    } else {
+        select_device(&output_devices, "出力")
+            .context("出力デバイスの選択に失敗しました")?
+    };
 
     println!(
         "選択された入力デバイス: {}",
@@ -464,22 +551,26 @@ fn main() -> OrtResult<()> {
 
     // 入力ストリームの作成
     println!("入力ストリームを作成中...");
-    let input_stream = record_and_resample(Arc::clone(&hparams), input_device, input_tx);
+    let input_stream = record_and_resample(Arc::clone(&hparams), input_device, input_tx)?;
 
     // 処理スレッドの開始
     println!("処理スレッドを開始します...");
     let hparams_clone = Arc::clone(&hparams);
     let session_clone = Arc::clone(&session);
     thread::spawn(move || {
-        // 処理スレッド内で優先度を設定
-        let current_thread = unsafe { GetCurrentThread() };
-        let success = unsafe { SetThreadPriority(current_thread, THREAD_PRIORITY_TIME_CRITICAL) };
-        match success {
-            Ok(_) => {
-                println!("処理スレッドの優先度を THREAD_PRIORITY_TIME_CRITICAL に設定しました。")
+        #[cfg(target_os = "windows")]
+        {
+            // 処理スレッド内で優先度を設定
+            let current_thread = unsafe { GetCurrentThread() };
+            let success = unsafe { SetThreadPriority(current_thread, THREAD_PRIORITY_TIME_CRITICAL) };
+            match success {
+                Ok(_) => {
+                    println!("処理スレッドの優先度を THREAD_PRIORITY_TIME_CRITICAL に設定しました。")
+                }
+                Err(e) => eprintln!("処理スレッドの優先度設定に失敗しました。エラー: {:?}", e),
             }
-            Err(e) => eprintln!("処理スレッドの優先度設定に失敗しました。エラー: {:?}", e),
         }
+
         if let Err(e) = processing_thread(hparams_clone, session_clone, input_rx, output_tx) {
             eprintln!("処理スレッドでエラーが発生しました: {:?}", e);
         }
@@ -487,37 +578,21 @@ fn main() -> OrtResult<()> {
 
     // 出力ストリームの作成
     println!("出力ストリームを作成中...");
-    let output_stream = play_output(Arc::clone(&hparams), output_device, output_rx);
+    let output_stream = play_output(Arc::clone(&hparams), output_device, output_rx)?;
 
     // ストリームの開始
     println!("入力ストリームを再生開始...");
     input_stream
         .play()
-        .expect("入力ストリームの再生に失敗しました");
+        .context("入力ストリームの再生に失敗しました")?;
     println!("出力ストリームを再生開始...");
     output_stream
         .play()
-        .expect("出力ストリームの再生に失敗しました");
+        .context("出力ストリームの再生に失敗しました")?;
 
     println!("プログラムが正常に起動しました。処理を続けています...");
     // メインスレッドをブロック
     loop {
-        thread::sleep(std::time::Duration::from_millis(50));
+        thread::sleep(std::time::Duration::from_millis(1000));
     }
-}
-
-// ユーザーからの入力を読み取る関数
-fn read_input(prompt: &str) -> Result<i64, String> {
-    let mut input = String::new();
-    print!("{}", prompt);
-    io::stdout()
-        .flush()
-        .map_err(|_| "プロンプトのフラッシュに失敗しました".to_string())?;
-    io::stdin()
-        .read_line(&mut input)
-        .map_err(|_| "入力の読み取りに失敗しました".to_string())?;
-    input
-        .trim()
-        .parse::<i64>()
-        .map_err(|_| "入力が整数ではありません".to_string())
 }
