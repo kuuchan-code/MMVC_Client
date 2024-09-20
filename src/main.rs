@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
+use clap::{Arg, Command};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, StreamConfig};
-use clap::{Arg, Command};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use ndarray::{Array1, Array3, CowArray};
 use ort::{
@@ -230,41 +230,43 @@ fn record_and_resample(
     let input_stream_config: StreamConfig = input_config.into();
     let mut buffer = Vec::new();
 
-    let stream = input_device.build_input_stream(
-        &input_stream_config,
-        move |data: &[f32], _: &cpal::InputCallbackInfo| {
-            // モノラル化
-            let mono_signal: Vec<f32> = data
-                .chunks(channels)
-                .map(|chunk| chunk.iter().sum::<f32>() / channels as f32)
-                .collect();
+    let stream = input_device
+        .build_input_stream(
+            &input_stream_config,
+            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+                // モノラル化
+                let mono_signal: Vec<f32> = data
+                    .chunks(channels)
+                    .map(|chunk| chunk.iter().sum::<f32>() / channels as f32)
+                    .collect();
 
-            buffer.extend_from_slice(&mono_signal);
+                buffer.extend_from_slice(&mono_signal);
 
-            while buffer.len() >= BUFFER_SIZE {
-                let chunk = buffer.drain(..BUFFER_SIZE).collect::<Vec<f32>>();
-                let mut resampled = vec![
-                    0.0;
-                    (chunk.len() as f64 * hparams.sample_rate as f64 / input_sample_rate as f64)
-                        .ceil() as usize
-                ];
-                // リサンプリング
-                if let Ok((_, output_generated)) = resampler.process_float(0, &chunk, &mut resampled)
-                {
-                    resampled.truncate(output_generated);
-                    if input_tx.send(resampled).is_err() {
+                while buffer.len() >= BUFFER_SIZE {
+                    let chunk = buffer.drain(..BUFFER_SIZE).collect::<Vec<f32>>();
+                    let mut resampled = vec![
+                        0.0;
+                        (chunk.len() as f64 * hparams.sample_rate as f64 / input_sample_rate as f64)
+                            .ceil() as usize
+                    ];
+                    // リサンプリング
+                    if let Ok((_, output_generated)) =
+                        resampler.process_float(0, &chunk, &mut resampled)
+                    {
+                        resampled.truncate(output_generated);
+                        if input_tx.send(resampled).is_err() {
+                            break;
+                        }
+                    } else {
+                        eprintln!("リサンプリングに失敗しました");
                         break;
                     }
-                } else {
-                    eprintln!("リサンプリングに失敗しました");
-                    break;
                 }
-            }
-        },
-        move |err| eprintln!("入力ストリームエラー: {}", err),
-        None,
-    )
-    .context("入力ストリームの構築に失敗しました")?;
+            },
+            move |err| eprintln!("入力ストリームエラー: {}", err),
+            None,
+        )
+        .context("入力ストリームの構築に失敗しました")?;
 
     Ok(stream)
 }
@@ -295,38 +297,39 @@ fn play_output(
     let output_stream_config = output_config.config();
     let channels = output_config.channels() as usize;
 
-    let stream = output_device.build_output_stream(
-        &output_stream_config,
-        move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
-            // 出力データを取得
-            while let Ok(processed_signal) = output_rx.try_recv() {
-                let mut resampled = vec![
-                    0.0;
-                    (processed_signal.len() as f64 * resampling_ratio).ceil()
-                        as usize
-                ];
-                if let Ok((_, output_generated)) =
-                    resampler.process_float(0, &processed_signal, &mut resampled)
-                {
-                    resampled.truncate(output_generated);
-                    output_buffer.extend(resampled);
-                } else {
-                    eprintln!("リサンプリングに失敗しました");
+    let stream = output_device
+        .build_output_stream(
+            &output_stream_config,
+            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                // 出力データを取得
+                while let Ok(processed_signal) = output_rx.try_recv() {
+                    let mut resampled = vec![
+                        0.0;
+                        (processed_signal.len() as f64 * resampling_ratio).ceil()
+                            as usize
+                    ];
+                    if let Ok((_, output_generated)) =
+                        resampler.process_float(0, &processed_signal, &mut resampled)
+                    {
+                        resampled.truncate(output_generated);
+                        output_buffer.extend(resampled);
+                    } else {
+                        eprintln!("リサンプリングに失敗しました");
+                    }
                 }
-            }
 
-            // 出力バッファからデータを供給
-            for frame in data.chunks_mut(channels) {
-                let sample = output_buffer.pop_front().unwrap_or(0.0);
-                for channel in frame.iter_mut() {
-                    *channel = sample;
+                // 出力バッファからデータを供給
+                for frame in data.chunks_mut(channels) {
+                    let sample = output_buffer.pop_front().unwrap_or(0.0);
+                    for channel in frame.iter_mut() {
+                        *channel = sample;
+                    }
                 }
-            }
-        },
-        move |err| eprintln!("出力ストリームエラー: {}", err),
-        None,
-    )
-    .context("出力ストリームの構築に失敗しました")?;
+            },
+            move |err| eprintln!("出力ストリームエラー: {}", err),
+            None,
+        )
+        .context("出力ストリームの構築に失敗しました")?;
 
     Ok(stream)
 }
@@ -412,7 +415,9 @@ fn select_device(devices: &[Device], label: &str) -> Result<Device> {
 
     let stdin = io::stdin();
     print!("{}デバイスの番号を選択してください: ", label);
-    io::stdout().flush().context("プロンプトのフラッシュに失敗しました")?;
+    io::stdout()
+        .flush()
+        .context("プロンプトのフラッシュに失敗しました")?;
 
     let input = stdin
         .lock()
@@ -574,8 +579,7 @@ fn main() -> Result<()> {
             .cloned()
             .with_context(|| format!("入力デバイス番号 {} は存在しません", index))?
     } else {
-        select_device(&input_devices, "入力")
-            .context("入力デバイスの選択に失敗しました")?
+        select_device(&input_devices, "入力").context("入力デバイスの選択に失敗しました")?
     };
 
     let output_device = if let Some(index) = output_device_arg {
@@ -584,8 +588,7 @@ fn main() -> Result<()> {
             .cloned()
             .with_context(|| format!("出力デバイス番号 {} は存在しません", index))?
     } else {
-        select_device(&output_devices, "出力")
-            .context("出力デバイスの選択に失敗しました")?
+        select_device(&output_devices, "出力").context("出力デバイスの選択に失敗しました")?
     };
 
     println!(
@@ -618,17 +621,15 @@ fn main() -> Result<()> {
         {
             // 処理スレッド内で優先度を設定
             let current_thread = unsafe { GetCurrentThread() };
-            let success = unsafe { SetThreadPriority(current_thread, THREAD_PRIORITY_TIME_CRITICAL) };
+            let success =
+                unsafe { SetThreadPriority(current_thread, THREAD_PRIORITY_TIME_CRITICAL) };
             match success {
                 Ok(_) => {
                     println!(
                         "処理スレッドの優先度を THREAD_PRIORITY_TIME_CRITICAL に設定しました。"
                     )
                 }
-                Err(e) => eprintln!(
-                    "処理スレッドの優先度設定に失敗しました。エラー: {:?}",
-                    e
-                ),
+                Err(e) => eprintln!("処理スレッドの優先度設定に失敗しました。エラー: {:?}", e),
             }
         }
 
