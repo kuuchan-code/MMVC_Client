@@ -188,6 +188,11 @@ fn apply_stft_with_hann_window(audio_signal: &[f32], hparams: &AudioParams) -> A
     // scratchバッファの追加
     let mut scratch_buffer = vec![Complex::zero(); fft.get_inplace_scratch_len()];
 
+    // 周波数解像度の計算
+    let freq_resolution = hparams.sample_rate as f32 / fft_size as f32;
+    let cutoff_freq = 150.0;
+    let cutoff_bin = (cutoff_freq / freq_resolution).ceil() as usize;
+
     for (i, frame) in audio_signal.windows(fft_size).step_by(hop_size).enumerate() {
         // 窓関数の適用と複素数への変換
         for (j, &sample) in frame.iter().enumerate() {
@@ -197,14 +202,19 @@ fn apply_stft_with_hann_window(audio_signal: &[f32], hparams: &AudioParams) -> A
         // FFTの実行
         fft.process_with_scratch(&mut input_buffer, &mut scratch_buffer);
 
-        // スペクトログラムの取得
+        // スペクトログラムの取得とフィルタリング
         for (j, bin) in input_buffer.iter().take(fft_size / 2 + 1).enumerate() {
-            spectrogram[[0, j, i]] = bin.norm();
+            if j < cutoff_bin {
+                spectrogram[[0, j, i]] = 0.0; // 150Hz以下をゼロに
+            } else {
+                spectrogram[[0, j, i]] = bin.norm();
+            }
         }
     }
 
     spectrogram
 }
+
 
 // 音声の録音とリサンプリングを行う関数
 fn record_and_resample(
