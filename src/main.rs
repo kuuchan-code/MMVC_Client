@@ -79,9 +79,7 @@ fn processing_thread(
         let merged_signal = sola.merge(&processed_signal);
 
         // 次回のために入力の終端を保持
-        let dispose_length = overlap_size;
-        let tail_len = input_signal.len().min(dispose_length);
-        prev_input_tail = input_signal[input_signal.len() - tail_len..].to_vec();
+        prev_input_tail = input_signal[input_signal.len() - overlap_size..].to_vec();
 
         // マージした信号を送信
         if output_tx.send(merged_signal).is_err() {
