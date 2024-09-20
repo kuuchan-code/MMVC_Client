@@ -256,6 +256,11 @@ fn play_output(
 ) -> cpal::Stream {
     let output_config = output_device.default_output_config().unwrap();
     let output_sample_rate = output_config.sample_rate().0;
+    let input_sample_rate = hparams.sample_rate;
+    let resampling_ratio = output_sample_rate as f64 / input_sample_rate as f64;
+
+    // リサンプリング後の最大バッファサイズを計算
+    let max_buffer_size = (BUFFER_SIZE as f64 * resampling_ratio).ceil() as usize;
     let mut resampler = SpeexResampler::new(
         1,
         hparams.sample_rate as usize,
@@ -263,7 +268,7 @@ fn play_output(
         5,
     )
     .unwrap();
-    let mut output_buffer: VecDeque<f32> = VecDeque::with_capacity(BUFFER_SIZE);
+    let mut output_buffer: VecDeque<f32> = VecDeque::with_capacity(max_buffer_size);
     let output_stream_config = output_config.config();
     let channels = output_config.channels() as usize;
 
@@ -271,12 +276,12 @@ fn play_output(
         .build_output_stream(
             &output_stream_config,
             move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+                // 出力データを取得
                 while let Ok(processed_signal) = output_rx.try_recv() {
                     let mut resampled = vec![
                         0.0;
-                        (processed_signal.len() as f64 * output_sample_rate as f64
-                            / hparams.sample_rate as f64)
-                            .ceil() as usize
+                        (processed_signal.len() as f64 * resampling_ratio).ceil()
+                            as usize
                     ];
                     let (_, output_generated) = resampler
                         .process_float(0, &processed_signal, &mut resampled)
@@ -285,6 +290,7 @@ fn play_output(
                     output_buffer.extend(resampled);
                 }
 
+                // 出力バッファからデータを供給
                 for frame in data.chunks_mut(channels) {
                     let sample = output_buffer.pop_front().unwrap_or(0.0);
                     for channel in frame.iter_mut() {
@@ -391,17 +397,6 @@ fn select_device(devices: Vec<Device>, label: &str) -> Device {
 }
 
 fn main() -> OrtResult<()> {
-    // 現在のスレッドの優先度を最高に設定
-    let current_thread = unsafe { GetCurrentThread() };
-
-    // スレッド優先度を TimeCritical に設定
-    let success = unsafe { SetThreadPriority(current_thread, THREAD_PRIORITY_TIME_CRITICAL) };
-
-    match success {
-        Ok(_) => println!("スレッド優先度を THREAD_PRIORITY_TIME_CRITICAL に設定しました。"),
-        Err(e) => eprintln!("スレッド優先度の設定に失敗しました。エラー: {:?}", e),
-    }
-
     // コマンドライン引数からONNXファイル名を取得
     let args: Vec<String> = env::args().collect();
     let onnx_file = if args.len() > 1 {
@@ -481,6 +476,15 @@ fn main() -> OrtResult<()> {
     let hparams_clone = Arc::clone(&hparams);
     let session_clone = Arc::clone(&session);
     thread::spawn(move || {
+        // 処理スレッド内で優先度を設定
+        let current_thread = unsafe { GetCurrentThread() };
+        let success = unsafe { SetThreadPriority(current_thread, THREAD_PRIORITY_TIME_CRITICAL) };
+        match success {
+            Ok(_) => {
+                println!("処理スレッドの優先度を THREAD_PRIORITY_TIME_CRITICAL に設定しました。")
+            }
+            Err(e) => eprintln!("処理スレッドの優先度設定に失敗しました。エラー: {:?}", e),
+        }
         if let Err(e) = processing_thread(hparams_clone, session_clone, input_rx, output_tx) {
             eprintln!("処理スレッドでエラーが発生しました: {:?}", e);
         }
