@@ -3,7 +3,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, StreamConfig};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use eframe::{self};
-use egui::{self, ComboBox};
+use egui::{self, Color32, ComboBox, ProgressBar, Slider};
 use ndarray::{Array1, Array3, CowArray};
 use ort::{
     tensor::OrtOwnedTensor, Environment, ExecutionProvider, GraphOptimizationLevel, Session,
@@ -518,7 +518,10 @@ impl MyApp {
             error_message: None,
         }
     }
-
+    fn calculate_latency_ms(&self) -> f32 {
+        let total_samples = self.buffer_size + self.overlap_length;
+        (total_samples as f32 / self.model_sample_rate as f32) * 1000.0
+    }
     fn start_processing(&mut self) -> Result<()> {
         // パラメータのチェック
         if self.onnx_file.is_empty() {
@@ -627,7 +630,20 @@ impl MyApp {
 
         Ok(())
     }
+    fn calculate_quality(&self) -> f32 {
+        let min_buffer = 2048.0;
+        let max_buffer = 16384.0;
+        let min_overlap = min_buffer / 4.0;
+        let max_overlap = (max_buffer / 2.0) - 128.0;
 
+        let buffer_factor =
+            ((self.buffer_size as f32 - min_buffer) / (max_buffer - min_buffer)).clamp(0.0, 1.0);
+        let overlap_factor = ((self.overlap_length as f32 - min_overlap)
+            / (max_overlap - min_overlap))
+            .clamp(0.0, 1.0);
+
+        (buffer_factor + overlap_factor) / 2.0
+    }
     fn stop_processing(&mut self) {
         // ストリームを停止
         self.input_stream.take();
@@ -750,30 +766,62 @@ impl eframe::App for MyApp {
             }
 
             ui.separator();
-
-            // その他のパラメータ
             ui.group(|ui| {
+                // バッファサイズ（チャンクサイズ）の設定
                 ui.horizontal(|ui| {
                     ui.label("バッファサイズ:");
                     ui.add(
-                        egui::Slider::new(&mut self.buffer_size, 2048..=16384)
+                        Slider::new(&mut self.buffer_size, 2048..=16384)
                             .step_by(512.0) // 512刻みで調整可能に
-                            .text("バイト"),
-                    );
+                            .text("バイト")
+                    )
+                    .on_hover_text("バッファサイズが小さいと遅延が低く、大きいと音質が向上します。");
                 });
 
+                // オーバーラップ長の設定
                 ui.horizontal(|ui| {
                     ui.label("オーバーラップ長:");
                     ui.add(
-                        egui::Slider::new(
+                        Slider::new(
                             &mut self.overlap_length,
-                            128..=self.buffer_size / 2 - 128,
+                            (self.buffer_size / 4)..=(self.buffer_size / 2 - 128),
                         )
                         .step_by(128.0) // 128刻みで調整可能に
-                        .text("バイト"),
-                    );
+                        .text("バイト")
+                    )
+                    .on_hover_text("オーバーラップ長が短いと遅延が小さく、大きいと音質が向上します。");
+                });
+
+                // 音質と遅延のバランスを示すインディケーター
+                ui.separator();
+
+                // 音質と遅延の計算
+                let quality = self.calculate_quality();
+                let latency_ms = self.calculate_latency_ms();
+
+                // 縦に並べる
+                ui.vertical(|ui| {
+                    ui.label("音質と遅延のバランス:");
+
+                    // 音質のプログレスバー
+                    ui.horizontal(|ui| {
+                        ui.label("音質:");
+                        ui.add(
+                            ProgressBar::new(quality)
+                                .fill(Color32::from_rgb(0, 200, 0)) // 緑色
+                                .show_percentage()
+                        )
+                        .on_hover_text("音質の指標です。バッファサイズとオーバーラップ長が大きいほど高くなります。");
+                    });
+
+                    // 遅延の表示
+                    ui.horizontal(|ui| {
+                        ui.label("遅延:");
+                        ui.label(format!("{:.2} ms", latency_ms));
+                    });
                 });
             });
+
 
             ui.separator();
 
@@ -815,6 +863,29 @@ impl eframe::App for MyApp {
             );
         });
     }
+
+    fn save(&mut self, _storage: &mut dyn eframe::Storage) {}
+
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {}
+
+    fn auto_save_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs(30)
+    }
+
+    fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
+        // NOTE: a bright gray makes the shadows of the windows look weird.
+        // We use a bit of transparency so that if the user switches on the
+        // `transparent()` option they get immediate results.
+        egui::Color32::from_rgba_unmultiplied(12, 12, 12, 180).to_normalized_gamma_f32()
+
+        // _visuals.window_fill() would also be a natural choice
+    }
+
+    fn persist_egui_memory(&self) -> bool {
+        true
+    }
+
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, _raw_input: &mut egui::RawInput) {}
 }
 
 fn main() -> Result<()> {
