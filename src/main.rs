@@ -674,7 +674,6 @@ impl eframe::App for MyApp {
             ui.group(|ui| {
                 egui::Grid::new("model_settings")
                     .num_columns(3)
-                    .spacing([40.0, 10.0])
                     .show(ui, |ui| {
                         ui.label("モデルのサンプルレート:");
                         ui.add(
