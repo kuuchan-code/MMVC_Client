@@ -452,8 +452,8 @@ impl MyApp {
         );
         // スタイルのカスタマイズ
         let mut style = (*cc.egui_ctx.style()).clone();
-        style.spacing.item_spacing = egui::vec2(10.0, 10.0); // アイテム間のスペースを調整
-        style.spacing.window_margin = egui::Margin::symmetric(10.0, 10.0); // ウィンドウの余白を調整
+        style.spacing.item_spacing = egui::vec2(8.0, 4.0); // アイテム間のスペースを調整
+        style.spacing.window_margin =  egui::Margin::same(10.0); // ウィンドウの余白を調整
         cc.egui_ctx.set_style(style);
         // プロポーショナルフォントファミリーに追加
         fonts
@@ -505,7 +505,7 @@ impl MyApp {
             cutoff_freq: 150.0,
             model_sample_rate: 24000,
             buffer_size: 6144,
-            overlap_length: 1024,
+            overlap_length: 1536,
 
             input_device_names,
             output_device_names,
@@ -520,8 +520,15 @@ impl MyApp {
     }
     fn calculate_latency_ms(&self) -> f32 {
         let total_samples = self.buffer_size + self.overlap_length;
-        (total_samples as f32 / self.model_sample_rate as f32) * 1000.0
-    }
+        let processing_delay = (total_samples as f32 / self.model_sample_rate as f32) * 1000.0;
+
+        // リサンプリングによる遅延（例として固定値を使用）
+        let resampling_delay_ms = 25.0; // 実際には測定または推定が必要
+
+        // ONNX推論による遅延（例として固定値を使用）
+        let onnx_inference_delay_ms = 75.0; // 実際には測定または推定が必要
+
+        processing_delay + resampling_delay_ms + onnx_inference_delay_ms    }
     fn start_processing(&mut self) -> Result<()> {
         // パラメータのチェック
         if self.onnx_file.is_empty() {
@@ -662,6 +669,8 @@ impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.heading("MMVC クライアント");
+        // スクロール可能な領域にUI要素を配置
+        egui::ScrollArea::vertical().show(ui, |ui| {
 
             // エラーメッセージの表示
             if let Some(ref msg) = self.error_message {
@@ -860,7 +869,7 @@ impl eframe::App for MyApp {
                         }
                     }
                 },
-            );
+            );});
         });
     }
 
