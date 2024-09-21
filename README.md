@@ -20,17 +20,11 @@
 ## 動作確認済み環境
 [MMVC_Trainer v1.3.2.11](https://github.com/isletennos/MMVC_Trainer/releases/tag/v1.3.2.11)で訓練したモデルで動作確認済み。
 
-## ダウンロード
-
-最新バージョンのバイナリは以下のリンクからダウンロードできます：
-
-* [mmvc_client_v0.2.1_x86_64_win.zip](https://github.com/kuuchan-code/MMVC_Client/releases/download/v0.2.1/mmvc_client_v0.2.1_x86_64_win.zip)
-
 ### ダウンロード手順
 
 1. [リリースページ](https://github.com/kuuchan-code/MMVC_Client/releases)にアクセスします。
 2. 最新バージョンのZIPファイルをダウンロードします。
-3. ダウンロードしたZIPファイルを解凍し、実行ファイルを適当なディレクトリに配置します。
+3. ダウンロードしたZIPファイルを解凍します。
 
 ## 使い方
 
