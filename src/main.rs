@@ -919,7 +919,6 @@ impl eframe::App for MyApp {
                             ui.label(format!("バッファ遅延: {:.2} ms", buffer_delay));
                             ui.label(format!("オーバーラップ遅延: {:.2} ms", overlap_delay));
                             ui.label(format!("リサンプリング遅延: {:.2} ms", delays_guard.resampling_delay_ms));
-ui.label(format!("処理遅延 (推論遅延含む): {:.2} ms", delays_guard.processing_delay_ms));
                             ui.label(format!("推論遅延: {:.2} ms", delays_guard.inference_delay_ms));
                         })
                     });
