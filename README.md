@@ -18,7 +18,7 @@
 
 最新バージョンのバイナリは以下のリンクからダウンロードできます：
 
-* [mmvc_client_v0.2.0_x86_64_win.zip](https://github.com/kuuchan-code/MMVC_Client/releases/download/v0.2.0/mmvc_client_v0.2.0_x86_64_win.zip)
+* [mmvc_client_v0.2.1_x86_64_win.zip](https://github.com/kuuchan-code/MMVC_Client/releases/download/v0.2.1/mmvc_client_v0.2.1_x86_64_win.zip)
 
 ### ダウンロード手順
 
