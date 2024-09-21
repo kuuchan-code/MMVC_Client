@@ -13,12 +13,18 @@
 * **柔軟な設定**: サンプルレート、バッファサイズ、オーバーラップ長など、複数のパラメータをGUIから調整可能。
 * **SOLAアルゴリズム**: スムーズな音声クロスフェードを実現するSOLA（Synchronous Overlap-Add）アルゴリズムの実装。
 * **GUIサポート**: 簡単なクリック操作で、モデルの選択、入力・出力デバイスの設定、変換パラメータの変更が可能。
+* 
+## 必要なファイル
+このクライアントを使用するためには、[MMVC_Trainer v1.3](https://github.com/isletennos/MMVC_Trainer) で訓練したONNXファイルが必要です。事前にモデルを訓練し、ONNX形式でエクスポートしてください。
+
+## 動作確認済み環境
+[MMVC_Trainer v1.3.2.11](https://github.com/isletennos/MMVC_Trainer/releases/tag/v1.3.2.11)で訓練したモデルで動作確認済み。
 
 ## ダウンロード
 
 最新バージョンのバイナリは以下のリンクからダウンロードできます：
 
-* [mmvc_client_v0.2.0_x86_64_win.zip](https://github.com/kuuchan-code/MMVC_Client/releases/download/v0.2.0/mmvc_client_v0.2.0_x86_64_win.zip)
+* [mmvc_client_v0.2.1_x86_64_win.zip](https://github.com/kuuchan-code/MMVC_Client/releases/download/v0.2.1/mmvc_client_v0.2.1_x86_64_win.zip)
 
 ### ダウンロード手順
 
