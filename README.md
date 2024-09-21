@@ -110,5 +110,3 @@ mmvc_client.exe \
 * * *
 
 © 2024 ku-chan. All rights reserved.
-
-* * *
