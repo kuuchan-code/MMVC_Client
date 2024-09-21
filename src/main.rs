@@ -74,16 +74,6 @@ struct Delays {
     resampling_delay_ms: f32,
 }
 
-impl Delays {
-    fn new() -> Self {
-        Self {
-            processing_delay_ms: 0.0,
-            inference_delay_ms: 0.0,
-            resampling_delay_ms: 0.0,
-        }
-    }
-}
-
 // 処理スレッド
 fn processing_thread(
     hparams: Arc<AudioParams>,
@@ -575,17 +565,23 @@ impl MyApp {
             is_running: false,
             error_message: None,
 
-            delays: Arc::new(Mutex::new(Delays::new())), // 追加
+            delays: Arc::new(Mutex::new(Delays {
+                processing_delay_ms: 0.0,
+                inference_delay_ms: 0.0,
+                resampling_delay_ms: 0.0,
+            })),
         }
     }
 
     fn calculate_latency_ms(&self) -> f32 {
-        let total_samples = self.buffer_size + self.overlap_length;
-        let processing_delay = (total_samples as f32 / self.model_sample_rate as f32) * 1000.0;
+        let buffer_delay = self.buffer_size as f32 / self.model_sample_rate as f32 * 1000.0;
+        let overlap_delay = self.overlap_length as f32 / self.model_sample_rate as f32 * 1000.0;
 
-        // 計測された遅延を加算
         let delays_guard = self.delays.lock().unwrap();
-        processing_delay + delays_guard.resampling_delay_ms + delays_guard.inference_delay_ms
+        let resampling_delay = delays_guard.resampling_delay_ms;
+        let processing_delay = delays_guard.processing_delay_ms;
+
+        buffer_delay + overlap_delay + resampling_delay + processing_delay
     }
 
     fn start_processing(&mut self) -> Result<()> {
@@ -735,7 +731,6 @@ impl MyApp {
         self.is_running = false;
     }
 }
-
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -754,12 +749,14 @@ impl eframe::App for MyApp {
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
                         ui.label("ONNXモデルファイル:");
-                        if ui.button("選択...").clicked() {
-                            // ファイルダイアログを開く
-                            if let Some(path) = rfd::FileDialog::new().pick_file() {
-                                self.onnx_file = path.to_string_lossy().to_string();
+                        ui.add_enabled_ui(!self.is_running, |ui| {
+                            if ui.button("選択...").clicked() {
+                                // ファイルダイアログを開く
+                                if let Some(path) = rfd::FileDialog::new().pick_file() {
+                                    self.onnx_file = path.to_string_lossy().to_string();
+                                }
                             }
-                        }
+                        });
                     });
                     ui.label(&self.onnx_file);
                 });
@@ -771,27 +768,30 @@ impl eframe::App for MyApp {
                     egui::Grid::new("model_settings")
                         .num_columns(3)
                         .show(ui, |ui| {
-                            ui.label("モデルのサンプルレート:");
-                            ui.add(
-                                egui::DragValue::new(&mut self.model_sample_rate)
-                                    .speed(1000)
-                                    .range(8000..=48000),
-                            );
-                            ui.end_row();
-                            ui.label("ソーススピーカーID:");
-                            ui.add(
-                                egui::DragValue::new(&mut self.source_speaker_id)
-                                    .speed(1)
-                                    .range(0..=1000),
-                            ); // 0以上の整数のみに制限
-                            ui.end_row();
+                            ui.add_enabled_ui(!self.is_running, |ui| {
+                                ui.label("モデルのサンプルレート:");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.model_sample_rate)
+                                        .speed(1000)
+                                        .range(8000..=48000),
+                                );
+                                ui.end_row();
+                                ui.label("ソーススピーカーID:");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.source_speaker_id)
+                                        .speed(1)
+                                        .range(0..=1000),
+                                );
+                                ui.end_row();
 
-                            ui.label("ターゲットスピーカーID:");
-                            ui.add(
-                                egui::DragValue::new(&mut self.target_speaker_id)
-                                    .speed(1)
-                                    .range(0..=1000),
-                            ); // 0以上の整数のみに制限
+                                ui.label("ターゲットスピーカーID:");
+                                ui.add(
+                                    egui::DragValue::new(&mut self.target_speaker_id)
+                                        .speed(1)
+                                        .range(0..=1000),
+                                );
+                                ui.end_row();
+                            });
                         });
                 });
 
@@ -799,77 +799,83 @@ impl eframe::App for MyApp {
 
                 // デバイスの選択
                 ui.group(|ui| {
-                    ui.horizontal(|ui| {
-                        ui.label("入力デバイス:");
-                        ComboBox::from_id_source("input_device")
-                            .selected_text(
-                                self.input_device_index
-                                    .and_then(|i| self.input_device_names.get(i))
-                                    .unwrap_or(&"入力デバイスを選択".to_string())
-                                    .clone(),
-                            )
-                            .width(200.0) // 幅を固定
-                            .show_ui(ui, |ui| {
-                                for (i, name) in self.input_device_names.iter().enumerate() {
-                                    ui.selectable_value(&mut self.input_device_index, Some(i), name);
-                                }
-                            });
-                    });
+                    ui.add_enabled_ui(!self.is_running, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label("入力デバイス:");
+                            ComboBox::from_id_source("input_device")
+                                .selected_text(
+                                    self.input_device_index
+                                        .and_then(|i| self.input_device_names.get(i))
+                                        .unwrap_or(&"入力デバイスを選択".to_string())
+                                        .clone(),
+                                )
+                                .width(200.0) // 幅を固定
+                                .show_ui(ui, |ui| {
+                                    for (i, name) in self.input_device_names.iter().enumerate() {
+                                        ui.selectable_value(&mut self.input_device_index, Some(i), name);
+                                    }
+                                });
+                        });
 
-                    ui.horizontal(|ui| {
-                        ui.label("出力デバイス:");
-                        ComboBox::from_id_source("output_device")
-                            .selected_text(
-                                self.output_device_index
-                                    .and_then(|i| self.output_device_names.get(i))
-                                    .unwrap_or(&"出力デバイスを選択".to_string())
-                                    .clone(),
-                            )
-                            .width(200.0) // 幅を固定
-                            .show_ui(ui, |ui| {
-                                for (i, name) in self.output_device_names.iter().enumerate() {
-                                    ui.selectable_value(&mut self.output_device_index, Some(i), name);
-                                }
-                            });
+                        ui.horizontal(|ui| {
+                            ui.label("出力デバイス:");
+                            ComboBox::from_id_source("output_device")
+                                .selected_text(
+                                    self.output_device_index
+                                        .and_then(|i| self.output_device_names.get(i))
+                                        .unwrap_or(&"出力デバイスを選択".to_string())
+                                        .clone(),
+                                )
+                                .width(200.0) // 幅を固定
+                                .show_ui(ui, |ui| {
+                                    for (i, name) in self.output_device_names.iter().enumerate() {
+                                        ui.selectable_value(&mut self.output_device_index, Some(i), name);
+                                    }
+                                });
+                        });
                     });
                 });
 
                 ui.separator();
 
                 // カットオフフィルター
-                ui.checkbox(&mut self.cutoff_enabled, "カットオフフィルターを有効にする");
-                if self.cutoff_enabled {
-                    ui.horizontal(|ui| {
-                        ui.label("カットオフ周波数:");
-                        ui.add(egui::Slider::new(&mut self.cutoff_freq, 1.0..=300.0).text("Hz"));
-                    });
-                }
+                ui.add_enabled_ui(!self.is_running, |ui| {
+                    ui.checkbox(&mut self.cutoff_enabled, "カットオフフィルターを有効にする");
+                    if self.cutoff_enabled {
+                        ui.horizontal(|ui| {
+                            ui.label("カットオフ周波数:");
+                            ui.add(egui::Slider::new(&mut self.cutoff_freq, 1.0..=300.0).text("Hz"));
+                        });
+                    }
+                });
 
                 ui.separator();
                 ui.group(|ui| {
-                    // バッファサイズ（チャンクサイズ）の設定
-                    ui.horizontal(|ui| {
-                        ui.label("バッファサイズ:");
-                        ui.add(
-                            Slider::new(&mut self.buffer_size, 2048..=16384)
-                                .step_by(512.0) // 512刻みで調整可能に
-                                .text("バイト")
-                        )
-                        .on_hover_text("バッファサイズが小さいと遅延が低く、大きいと音質が向上します。");
-                    });
-
-                    // オーバーラップ長の設定
-                    ui.horizontal(|ui| {
-                        ui.label("オーバーラップ長:");
-                        ui.add(
-                            Slider::new(
-                                &mut self.overlap_length,
-                                (self.buffer_size / 4)..=(self.buffer_size / 2 - 128),
+                    ui.add_enabled_ui(!self.is_running, |ui| {
+                        // バッファサイズ（チャンクサイズ）の設定
+                        ui.horizontal(|ui| {
+                            ui.label("バッファサイズ:");
+                            ui.add(
+                                Slider::new(&mut self.buffer_size, 2048..=16384)
+                                    .step_by(512.0) // 512刻みで調整可能に
+                                    .text("バイト")
                             )
-                            .step_by(128.0) // 128刻みで調整可能に
-                            .text("バイト")
-                        )
-                        .on_hover_text("オーバーラップ長が短いと遅延が小さく、大きいと音質が向上します。");
+                            .on_hover_text("バッファサイズが小さいと遅延が低く、大きいと音質が向上します。");
+                        });
+
+                        // オーバーラップ長の設定
+                        ui.horizontal(|ui| {
+                            ui.label("オーバーラップ長:");
+                            ui.add(
+                                Slider::new(
+                                    &mut self.overlap_length,
+                                    (self.buffer_size / 4)..=(self.buffer_size / 2 - 128),
+                                )
+                                .step_by(128.0) // 128刻みで調整可能に
+                                .text("バイト")
+                            )
+                            .on_hover_text("オーバーラップ長が短いと遅延が小さく、大きいと音質が向上します。");
+                        });
                     });
 
                     // 音質と遅延のバランスを示すインディケーター
@@ -878,6 +884,10 @@ impl eframe::App for MyApp {
                     // 音質と遅延の計算
                     let quality = self.calculate_quality();
                     let latency_ms = self.calculate_latency_ms();
+
+                    // バッファ遅延とオーバーラップ遅延の計算
+                    let buffer_delay = self.buffer_size as f32 / self.model_sample_rate as f32 * 1000.0;
+                    let overlap_delay = self.overlap_length as f32 / self.model_sample_rate as f32 * 1000.0;
 
                     // 縦に並べる
                     ui.vertical(|ui| {
@@ -902,25 +912,16 @@ impl eframe::App for MyApp {
 
                         ui.label("※ 音質や遅延は推定値です。実際の環境により異なる場合があります。");
 
-                        // 個別の遅延表示
-                        let delays_guard = self.delays.lock().unwrap();
-                        ui.separator();
-                        ui.label("遅延詳細:");
-                        ui.horizontal(|ui| {
-                            ui.label(format!("バッファ遅延: {:.2} ms",         self.buffer_size as f32 /self.model_sample_rate as f32  * 1000.0));
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label(format!("オーバーラップ遅延: {:.2} ms", self.overlap_length as f32 /self.model_sample_rate as f32 * 1000.0));
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label(format!("処理遅延 (推論遅延含む): {:.2} ms", delays_guard.processing_delay_ms));
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label(format!("推論遅延: {:.2} ms", delays_guard.inference_delay_ms));
-                        });
-                        ui.horizontal(|ui| {
+                        // 遅延詳細の表示を折りたたみ可能にする
+                        ui.collapsing("遅延の詳細を見る", |ui| {
+                            let delays_guard = self.delays.lock().unwrap();
+                            ui.separator();
+                            ui.label(format!("バッファ遅延: {:.2} ms", buffer_delay));
+                            ui.label(format!("オーバーラップ遅延: {:.2} ms", overlap_delay));
                             ui.label(format!("リサンプリング遅延: {:.2} ms", delays_guard.resampling_delay_ms));
-                        });
+ui.label(format!("処理遅延 (推論遅延含む): {:.2} ms", delays_guard.processing_delay_ms));
+                            ui.label(format!("推論遅延: {:.2} ms", delays_guard.inference_delay_ms));
+                        })
                     });
                 });
 
