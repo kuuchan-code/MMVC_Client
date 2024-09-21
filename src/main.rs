@@ -642,7 +642,7 @@ impl MyApp {
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("MMVC Client");
+            ui.heading("MMVC クライアント");
 
             // エラーメッセージの表示
             if let Some(ref msg) = self.error_message {
@@ -651,8 +651,8 @@ impl eframe::App for MyApp {
 
             // ONNXモデルファイルの選択
             ui.horizontal(|ui| {
-                ui.label("ONNX Model File:");
-                if ui.button("Select...").clicked() {
+                ui.label("ONNXモデルファイル:");
+                if ui.button("選択...").clicked() {
                     // ファイルダイアログを開く
                     if let Some(path) = rfd::FileDialog::new().pick_file() {
                         self.onnx_file = path.to_string_lossy().to_string();
@@ -663,20 +663,20 @@ impl eframe::App for MyApp {
 
             // スピーカーIDの入力
             ui.horizontal(|ui| {
-                ui.label("Source Speaker ID:");
+                ui.label("ソーススピーカーID:");
                 ui.add(egui::DragValue::new(&mut self.source_speaker_id));
-                ui.label("Target Speaker ID:");
+                ui.label("ターゲットスピーカーID:");
                 ui.add(egui::DragValue::new(&mut self.target_speaker_id));
             });
 
             // デバイスの選択
             ui.horizontal(|ui| {
-                ui.label("Input Device:");
+                ui.label("入力デバイス:");
                 ComboBox::from_id_source("input_device")
                     .selected_text(
                         self.input_device_index
                             .and_then(|i| self.input_device_names.get(i))
-                            .unwrap_or(&"Select Input Device".to_string())
+                            .unwrap_or(&"入力デバイスを選択".to_string())
                             .clone(),
                     )
                     .show_ui(ui, |ui| {
@@ -687,12 +687,12 @@ impl eframe::App for MyApp {
             });
 
             ui.horizontal(|ui| {
-                ui.label("Output Device:");
+                ui.label("出力デバイス:");
                 ComboBox::from_id_source("output_device")
                     .selected_text(
                         self.output_device_index
                             .and_then(|i| self.output_device_names.get(i))
-                            .unwrap_or(&"Select Output Device".to_string())
+                            .unwrap_or(&"出力デバイスを選択".to_string())
                             .clone(),
                     )
                     .show_ui(ui, |ui| {
@@ -703,25 +703,25 @@ impl eframe::App for MyApp {
             });
 
             // カットオフフィルター
-            ui.checkbox(&mut self.cutoff_enabled, "Enable Cutoff Filter");
+            ui.checkbox(&mut self.cutoff_enabled, "カットオフフィルターを有効にする");
             if self.cutoff_enabled {
                 ui.horizontal(|ui| {
-                    ui.label("Cutoff Frequency (Hz):");
+                    ui.label("カットオフ周波数 (Hz):");
                     ui.add(egui::DragValue::new(&mut self.cutoff_freq));
                 });
             }
 
             // その他のパラメータ
             ui.horizontal(|ui| {
-                ui.label("Model Sample Rate:");
+                ui.label("モデルのサンプルレート:");
                 ui.add(egui::DragValue::new(&mut self.model_sample_rate));
             });
             ui.horizontal(|ui| {
-                ui.label("Buffer Size:");
+                ui.label("バッファサイズ:");
                 ui.add(egui::DragValue::new(&mut self.buffer_size));
             });
             ui.horizontal(|ui| {
-                ui.label("Overlap Length:");
+                ui.label("オーバーラップ長:");
                 ui.add(egui::DragValue::new(&mut self.overlap_length));
             });
 
@@ -732,7 +732,7 @@ impl eframe::App for MyApp {
                     && self.output_device_index.is_some();
 
                 if ui
-                    .add_enabled(is_ready_to_start, egui::Button::new("Start"))
+                    .add_enabled(is_ready_to_start, egui::Button::new("開始"))
                     .clicked()
                 {
                     // 処理を開始
@@ -748,10 +748,9 @@ impl eframe::App for MyApp {
                     }
                 }
             } else {
-                if ui.button("Stop").clicked() {
+                if ui.button("停止").clicked() {
                     // 処理を停止
                     self.stop_processing();
-                    self.is_running = false;
                 }
             }
         });
