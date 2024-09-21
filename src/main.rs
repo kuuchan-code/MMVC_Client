@@ -498,7 +498,7 @@ impl MyApp {
         Self {
             onnx_file: "".to_string(),
             source_speaker_id: 0,
-            target_speaker_id: 0,
+            target_speaker_id: 107,
             input_device_index: None,
             output_device_index: None,
             cutoff_enabled: false,
@@ -672,17 +672,31 @@ impl eframe::App for MyApp {
 
             // スピーカーIDの入力
             ui.group(|ui| {
-                egui::Grid::new("speaker_ids")
-                    .num_columns(2)
+                egui::Grid::new("model_settings")
+                    .num_columns(3)
                     .spacing([40.0, 10.0])
                     .show(ui, |ui| {
+                        ui.label("モデルのサンプルレート:");
+                        ui.add(
+                            egui::DragValue::new(&mut self.model_sample_rate)
+                                .speed(1000)
+                                .range(8000..=48000),
+                        );
+                        ui.end_row();
                         ui.label("ソーススピーカーID:");
-                        ui.add(egui::DragValue::new(&mut self.source_speaker_id));
+                        ui.add(
+                            egui::DragValue::new(&mut self.source_speaker_id)
+                                .speed(1)
+                                .range(0..=1000),
+                        ); // 0以上の整数のみに制限
                         ui.end_row();
 
                         ui.label("ターゲットスピーカーID:");
-                        ui.add(egui::DragValue::new(&mut self.target_speaker_id));
-                        ui.end_row();
+                        ui.add(
+                            egui::DragValue::new(&mut self.target_speaker_id)
+                                .speed(1)
+                                .range(0..=1000),
+                        ); // 0以上の整数のみに制限
                     });
             });
 
@@ -731,8 +745,8 @@ impl eframe::App for MyApp {
             ui.checkbox(&mut self.cutoff_enabled, "カットオフフィルターを有効にする");
             if self.cutoff_enabled {
                 ui.horizontal(|ui| {
-                    ui.label("カットオフ周波数 (Hz):");
-                    ui.add(egui::DragValue::new(&mut self.cutoff_freq).speed(10.0));
+                    ui.label("カットオフ周波数:");
+                    ui.add(egui::Slider::new(&mut self.cutoff_freq, 1.0..=300.0).text("Hz"));
                 });
             }
 
@@ -741,27 +755,20 @@ impl eframe::App for MyApp {
             // その他のパラメータ
             ui.group(|ui| {
                 ui.horizontal(|ui| {
-                    ui.label("モデルのサンプルレート:");
-                    ui.add(
-                        egui::DragValue::new(&mut self.model_sample_rate)
-                            .speed(1000)
-                            .range(8000..=48000),
-                    );
-                });
-                ui.horizontal(|ui| {
                     ui.label("バッファサイズ:");
                     ui.add(
-                        egui::DragValue::new(&mut self.buffer_size)
-                            .speed(256)
-                            .range(256..=16384),
+                        egui::Slider::new(&mut self.buffer_size, 1024..=16384)
+                            .step_by(512.0) // 512刻みで調整可能に
+                            .text("バイト"),
                     );
                 });
+
                 ui.horizontal(|ui| {
                     ui.label("オーバーラップ長:");
                     ui.add(
-                        egui::DragValue::new(&mut self.overlap_length)
-                            .speed(128)
-                            .range(128..=2048),
+                        egui::Slider::new(&mut self.overlap_length, 128..=self.buffer_size / 4)
+                            .step_by(128.0) // 512刻みで調整可能に
+                            .text("バイト"),
                     );
                 });
             });
