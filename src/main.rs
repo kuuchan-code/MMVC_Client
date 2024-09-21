@@ -756,7 +756,7 @@ impl eframe::App for MyApp {
                 ui.horizontal(|ui| {
                     ui.label("バッファサイズ:");
                     ui.add(
-                        egui::Slider::new(&mut self.buffer_size, 1024..=16384)
+                        egui::Slider::new(&mut self.buffer_size, 2048..=16384)
                             .step_by(512.0) // 512刻みで調整可能に
                             .text("バイト"),
                     );
@@ -765,9 +765,12 @@ impl eframe::App for MyApp {
                 ui.horizontal(|ui| {
                     ui.label("オーバーラップ長:");
                     ui.add(
-                        egui::Slider::new(&mut self.overlap_length, 128..=self.buffer_size / 4)
-                            .step_by(128.0) // 512刻みで調整可能に
-                            .text("バイト"),
+                        egui::Slider::new(
+                            &mut self.overlap_length,
+                            128..=self.buffer_size / 2 - 128,
+                        )
+                        .step_by(128.0) // 128刻みで調整可能に
+                        .text("バイト"),
                     );
                 });
             });
