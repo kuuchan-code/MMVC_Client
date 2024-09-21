@@ -438,9 +438,37 @@ struct MyApp {
     error_message: Option<String>,
 }
 
+use egui::{FontData, FontDefinitions, FontFamily};
+
 impl MyApp {
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
-        // デバイスリストの取得
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+        // カスタムフォントの読み込み
+        let mut fonts = FontDefinitions::default();
+
+        // フォントデータを追加（パスは実際のフォントファイルの場所に合わせて変更してください）
+        fonts.font_data.insert(
+            "NotoSansJP".to_owned(),
+            FontData::from_static(include_bytes!("../assets/fonts/NotoSansJP-Regular.ttf")),
+        );
+
+        // プロポーショナルフォントファミリーに追加
+        fonts
+            .families
+            .get_mut(&FontFamily::Proportional)
+            .unwrap()
+            .insert(0, "NotoSansJP".to_owned());
+
+        // 必要に応じてモノスペースフォントファミリーにも追加
+        fonts
+            .families
+            .get_mut(&FontFamily::Monospace)
+            .unwrap()
+            .push("NotoSansJP".to_owned());
+
+        // フォントを設定
+        cc.egui_ctx.set_fonts(fonts);
+
+        // デバイスリストの取得（既存のコード）
         let host = cpal::default_host();
 
         let input_devices: Vec<Device> = host
