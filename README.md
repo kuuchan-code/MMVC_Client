@@ -88,76 +88,27 @@ mmvc_client.exe \
 
 ## ライセンス
 
-このプロジェクトはMITライセンスの下で公開されています。オリジナルの著作権は[Isle Tennos](https://github.com/isletennos/MMVC_Client)に帰属します。詳細は以下の内容を参照してください。
+このプロジェクトはMITライセンスの下で公開されています。詳細は LICENSE ファイルを参照してください。
 
-```sql
-The MIT License (MIT)
+本プロジェクトは以下のライセンスも遵守しています：
 
-Copyright (c) 2022 Isle Tennos
+* [isletennos/MMVC_Client](https://github.com/isletennos/MMVC_Client) - MIT License
+* [ONNX Runtime](https://github.com/microsoft/onnxruntime) - MIT License
 
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+### ライセンス
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+このプロジェクトはMITライセンスの下で公開されています。詳細は LICENSE ファイルを参照してください。
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
+### 作者
 
-また、本プロジェクトでは以下の著作権とライセンスも適用されています。
+* **ku-chan** - [kuuchan-code](https://github.com/kuuchan-code)
 
-```sql
-The MIT License (MIT)
+## お問い合わせ
 
-Copyright (c) 2019, Tim Sainburg
+ご質問やフィードバックがありましたら、[issues](https://github.com/kuuchan-code/MMVC_Client/issues)に投稿してください。
 
-Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
+* * *
 
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
+© 2024 ku-chan. All rights reserved.
 
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
-
-```sql
-The MIT License (MIT)
-
-Copyright (c) 2021 Jaehyeon Kim
-
-Permission is hereby granted, free of charge, to any person obtaining a copy
-of this software and associated documentation files (the "Software"), to deal
-in the Software without restriction, including without limitation the rights
-to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
-copies of the Software, and to permit persons to whom the Software is
-furnished to do so, subject to the following conditions:
-
-The above copyright notice and this permission notice shall be included in all
-copies or substantial portions of the Software.
-
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
-IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
-FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
-AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
-LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
-OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
-SOFTWARE.
-```
+* * *
