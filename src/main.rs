@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
-use clap::{Arg, Command};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, StreamConfig};
 use crossbeam_channel::{bounded, Receiver, Sender};
+use eframe::{self};
+use egui::{self, ComboBox};
 use ndarray::{Array1, Array3, CowArray};
 use ort::{
     tensor::OrtOwnedTensor, Environment, ExecutionProvider, GraphOptimizationLevel, Session,
@@ -13,9 +14,9 @@ use rustfft::{num_complex::Complex, FftPlanner};
 use speexdsp_resampler::State as SpeexResampler;
 use std::collections::VecDeque;
 use std::f32::consts::PI;
-use std::io::{self, BufRead, Write};
 use std::sync::Arc;
 use std::thread;
+use std::thread::JoinHandle;
 
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::{
@@ -413,298 +414,331 @@ impl Sola {
     }
 }
 
-// デバイス選択のための関数
-fn select_device(devices: &[Device], label: &str) -> Result<Device> {
-    println!("{} デバイス:", label);
-    for (i, device) in devices.iter().enumerate() {
-        println!("  {}: {}", i, device.name().unwrap_or_default());
-    }
+// メインアプリケーションクラス
+struct MyApp {
+    onnx_file: String,
+    source_speaker_id: i64,
+    target_speaker_id: i64,
+    input_device_index: Option<usize>,
+    output_device_index: Option<usize>,
+    cutoff_enabled: bool,
+    cutoff_freq: f32,
+    model_sample_rate: u32,
+    buffer_size: usize,
+    overlap_length: usize,
 
-    let stdin = io::stdin();
-    print!("{}デバイスの番号を選択してください: ", label);
-    io::stdout()
-        .flush()
-        .context("プロンプトのフラッシュに失敗しました")?;
+    input_device_names: Vec<String>,
+    output_device_names: Vec<String>,
 
-    let input = stdin
-        .lock()
-        .lines()
-        .next()
-        .context("入力の取得に失敗しました")?
-        .context("入力の読み取りに失敗しました")?;
+    input_stream: Option<cpal::Stream>,
+    output_stream: Option<cpal::Stream>,
+    processing_handle: Option<JoinHandle<()>>,
 
-    let index: usize = input
-        .trim()
-        .parse()
-        .context("有効なデバイス番号を入力してください")?;
-    devices
-        .get(index)
-        .cloned()
-        .with_context(|| format!("デバイス番号 {} は存在しません", index))
+    is_running: bool,
+    error_message: Option<String>,
 }
 
-// メイン関数
-fn main() -> Result<()> {
-    // ロガーの初期化
-    env_logger::init();
+impl MyApp {
+    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+        // デバイスリストの取得
+        let host = cpal::default_host();
 
-    // コマンドライン引数の定義
-    let matches = Command::new(env!("CARGO_PKG_NAME"))
-        .version(env!("CARGO_PKG_VERSION"))
-        .author(env!("CARGO_PKG_AUTHORS"))
-        .about(env!("CARGO_PKG_DESCRIPTION"))
-        .arg(
-            Arg::new("onnx")
-                .short('m')
-                .long("model")
-                .value_name("ONNX_FILE")
-                .help("使用するONNXファイルのパス")
-                .value_parser(clap::value_parser!(String))
-                .required(true),
-        )
-        .arg(
-            Arg::new("source_id")
-                .short('s')
-                .long("source")
-                .value_name("SOURCE_ID")
-                .help("ソーススピーカーID")
-                .required(true)
-                .value_parser(clap::value_parser!(i64)),
-        )
-        .arg(
-            Arg::new("target_id")
-                .short('t')
-                .long("target")
-                .value_name("TARGET_ID")
-                .help("ターゲットスピーカーID")
-                .required(true)
-                .value_parser(clap::value_parser!(i64)),
-        )
-        .arg(
-            Arg::new("input_device")
-                .short('i')
-                .long("input")
-                .value_name("INPUT_DEVICE")
-                .help("入力オーディオデバイスの番号")
-                .value_parser(clap::value_parser!(usize)),
-        )
-        .arg(
-            Arg::new("output_device")
-                .short('o')
-                .long("output")
-                .value_name("OUTPUT_DEVICE")
-                .help("出力オーディオデバイスの番号")
-                .value_parser(clap::value_parser!(usize)),
-        )
-        .arg(
-            Arg::new("cutoff")
-                .long("cutoff")
-                .help("カットオフフィルターを有効にする")
-                .action(clap::ArgAction::SetTrue),
-        )
-        .arg(
-            Arg::new("cutoff_freq")
-                .long("cutoff_freq")
-                .value_name("CUTOFF_FREQ")
-                .help("カットオフ周波数をHzで指定する（デフォルト: 150.0）")
-                .value_parser(clap::value_parser!(f32))
-                .default_value("150.0"),
-        )
-        // 新しい引数を追加
-        .arg(
-            Arg::new("model_sample_rate")
-                .short('r')
-                .long("model_sample_rate")
-                .value_name("MODEL_SAMPLE_RATE")
-                .help("モデルへ入力するオーディオのサンプルレートを指定する（デフォルト: 24000）")
-                .value_parser(clap::value_parser!(u32))
-                .default_value("24000"),
-        )
-        .arg(
-            Arg::new("buffer_size")
-                .short('b')
-                .long("buffer_size")
-                .value_name("BUFFER_SIZE")
-                .help("バッファサイズを指定する（デフォルト: 6144）")
-                .value_parser(clap::value_parser!(usize))
-                .default_value("6144"),
-        )
-        .arg(
-            Arg::new("overlap_length")
-                .short('l')
-                .long("overlap_length")
-                .value_name("OVERLAP_LENGTH")
-                .help("SOLAアルゴリズムのオーバーラップ長を指定する（デフォルト: 1024）")
-                .value_parser(clap::value_parser!(usize))
-                .default_value("1024"),
-        )
-        .get_matches();
+        let input_devices: Vec<Device> = host
+            .input_devices()
+            .map(|devices| devices.collect())
+            .unwrap_or_else(|_| Vec::new());
 
-    // 引数の取得
-    let onnx_file = matches
-        .get_one::<String>("onnx")
-        .expect("ONNXファイルを指定してください");
-    let source_speaker_id: i64 = *matches
-        .get_one::<i64>("source_id")
-        .expect("ソーススピーカーIDを指定してください");
-    let target_speaker_id: i64 = *matches
-        .get_one::<i64>("target_id")
-        .expect("ターゲットスピーカーIDを指定してください");
-    let input_device_arg: Option<usize> = matches.get_one::<usize>("input_device").copied();
-    let output_device_arg: Option<usize> = matches.get_one::<usize>("output_device").copied();
-    let cutoff_enabled = matches.get_flag("cutoff");
-    let cutoff_freq: f32 = *matches
-        .get_one::<f32>("cutoff_freq")
-        .expect("cutoff_freqのデフォルト値が設定されていません");
-    let model_sample_rate: u32 = *matches
-        .get_one::<u32>("model_sample_rate")
-        .expect("model_sample_rateのデフォルト値が設定されていません");
-    let buffer_size: usize = *matches
-        .get_one::<usize>("buffer_size")
-        .expect("buffer_sizeのデフォルト値が設定されていません");
-    let overlap_length: usize = *matches
-        .get_one::<usize>("overlap_length")
-        .expect("overlap_lengthのデフォルト値が設定されていません");
+        let output_devices: Vec<Device> = host
+            .output_devices()
+            .map(|devices| devices.collect())
+            .unwrap_or_else(|_| Vec::new());
 
-    println!("使用するONNXファイル: {}", onnx_file);
-    println!(
-        "カットオフフィルター: {}",
-        if cutoff_enabled {
-            format!("有効 (周波数: {} Hz)", cutoff_freq)
-        } else {
-            "無効".to_string()
+        let input_device_names = input_devices
+            .iter()
+            .map(|d| d.name().unwrap_or_else(|_| "Unknown".to_string()))
+            .collect();
+
+        let output_device_names = output_devices
+            .iter()
+            .map(|d| d.name().unwrap_or_else(|_| "Unknown".to_string()))
+            .collect();
+
+        Self {
+            onnx_file: "".to_string(),
+            source_speaker_id: 0,
+            target_speaker_id: 0,
+            input_device_index: None,
+            output_device_index: None,
+            cutoff_enabled: false,
+            cutoff_freq: 150.0,
+            model_sample_rate: 24000,
+            buffer_size: 6144,
+            overlap_length: 1024,
+
+            input_device_names,
+            output_device_names,
+
+            input_stream: None,
+            output_stream: None,
+            processing_handle: None,
+
+            is_running: false,
+            error_message: None,
         }
-    );
-    println!("モデルのサンプルレート: {} Hz", model_sample_rate);
-    println!("バッファサイズ: {}", buffer_size);
-    println!("オーバーラップ長: {}", overlap_length);
-
-    let hparams = Arc::new(AudioParams::new(
-        model_sample_rate,
-        buffer_size,
-        overlap_length,
-        source_speaker_id,
-        target_speaker_id,
-        cutoff_enabled,
-        cutoff_freq,
-    ));
-
-    // 環境とセッションの構築
-    println!("ONNX Runtimeの環境を構築中...");
-    let environment = Environment::builder()
-        .with_name("MMVC_Client")
-        .with_execution_providers([ExecutionProvider::TensorRT(Default::default())])
-        .build()
-        .context("ONNX Runtimeの環境構築に失敗しました")?
-        .into_arc();
-
-    println!("ONNX Runtimeセッションを構築中...");
-    let session = Arc::new(
-        SessionBuilder::new(&environment)
-            .context("ONNX Runtimeセッションビルダーの作成に失敗しました")?
-            .with_optimization_level(GraphOptimizationLevel::Level3)
-            .context("ONNX Runtimeの最適化レベル設定に失敗しました")?
-            .with_model_from_file(&onnx_file)
-            .context("ONNXモデルの読み込みに失敗しました")?,
-    );
-
-    // デバイス選択
-    println!("オーディオデバイスを取得中...");
-    let host = cpal::default_host();
-
-    let input_devices: Vec<Device> = host
-        .input_devices()
-        .context("入力デバイスの取得に失敗しました")?
-        .filter(|d| d.name().is_ok())
-        .collect();
-    let output_devices: Vec<Device> = host
-        .output_devices()
-        .context("出力デバイスの取得に失敗しました")?
-        .filter(|d| d.name().is_ok())
-        .collect();
-
-    let input_device = if let Some(index) = input_device_arg {
-        input_devices
-            .get(index)
-            .cloned()
-            .with_context(|| format!("入力デバイス番号 {} は存在しません", index))?
-    } else {
-        select_device(&input_devices, "入力").context("入力デバイスの選択に失敗しました")?
-    };
-
-    let output_device = if let Some(index) = output_device_arg {
-        output_devices
-            .get(index)
-            .cloned()
-            .with_context(|| format!("出力デバイス番号 {} は存在しません", index))?
-    } else {
-        select_device(&output_devices, "出力").context("出力デバイスの選択に失敗しました")?
-    };
-
-    println!(
-        "選択された入力デバイス: {}",
-        input_device
-            .name()
-            .unwrap_or_else(|_| "Unknown".to_string())
-    );
-    println!(
-        "選択された出力デバイス: {}",
-        output_device
-            .name()
-            .unwrap_or_else(|_| "Unknown".to_string())
-    );
-
-    // チャネルの作成
-    let (input_tx, input_rx) = bounded::<Vec<f32>>(0);
-    let (output_tx, output_rx) = bounded::<Vec<f32>>(0);
-
-    // 入力ストリームの作成
-    println!("入力ストリームを作成中...");
-    let input_stream = record_and_resample(Arc::clone(&hparams), input_device, input_tx)?;
-
-    // 処理スレッドの開始
-    println!("処理スレッドを開始します...");
-    let hparams_clone = Arc::clone(&hparams);
-    let session_clone = Arc::clone(&session);
-    thread::spawn(move || {
-        #[cfg(target_os = "windows")]
-        {
-            // 処理スレッド内で優先度を設定
-            let current_thread = unsafe { GetCurrentThread() };
-            let success =
-                unsafe { SetThreadPriority(current_thread, THREAD_PRIORITY_TIME_CRITICAL) };
-            match success {
-                Ok(_) => {
-                    println!(
-                        "処理スレッドの優先度を THREAD_PRIORITY_TIME_CRITICAL に設定しました。"
-                    )
-                }
-                Err(e) => eprintln!("処理スレッドの優先度設定に失敗しました。エラー: {:?}", e),
-            }
-        }
-
-        if let Err(e) = processing_thread(hparams_clone, session_clone, input_rx, output_tx) {
-            eprintln!("処理スレッドでエラーが発生しました: {:?}", e);
-        }
-    });
-
-    // 出力ストリームの作成
-    println!("出力ストリームを作成中...");
-    let output_stream = play_output(Arc::clone(&hparams), output_device, output_rx)?;
-
-    // ストリームの開始
-    println!("入力ストリームを再生開始...");
-    input_stream
-        .play()
-        .context("入力ストリームの再生に失敗しました")?;
-    println!("出力ストリームを再生開始...");
-    output_stream
-        .play()
-        .context("出力ストリームの再生に失敗しました")?;
-
-    println!("プログラムが正常に起動しました。処理を続けています...");
-    // メインスレッドをブロック
-    loop {
-        thread::sleep(std::time::Duration::from_millis(1000));
     }
+
+    fn start_processing(&mut self) -> Result<()> {
+        // パラメータのチェック
+        if self.onnx_file.is_empty() {
+            return Err(anyhow::anyhow!("ONNXファイルを選択してください"));
+        }
+
+        if self.input_device_index.is_none() || self.output_device_index.is_none() {
+            return Err(anyhow::anyhow!("入力および出力デバイスを選択してください"));
+        }
+
+        // 環境とセッションの構築
+        println!("ONNX Runtimeの環境を構築中...");
+        let environment = Environment::builder()
+            .with_name("MMVC_Client")
+            .with_execution_providers([ExecutionProvider::TensorRT(Default::default())])
+            .build()
+            .context("ONNX Runtimeの環境構築に失敗しました")?
+            .into_arc();
+
+        println!("ONNX Runtimeセッションを構築中...");
+        let session = Arc::new(
+            SessionBuilder::new(&environment)
+                .context("ONNX Runtimeセッションビルダーの作成に失敗しました")?
+                .with_optimization_level(GraphOptimizationLevel::Level3)
+                .context("ONNX Runtimeの最適化レベル設定に失敗しました")?
+                .with_model_from_file(&self.onnx_file)
+                .context("ONNXモデルの読み込みに失敗しました")?,
+        );
+
+        // デバイスの取得
+        let host = cpal::default_host();
+
+        let input_device = host
+            .input_devices()?
+            .nth(self.input_device_index.unwrap())
+            .context("入力デバイスの選択に失敗しました")?;
+
+        let output_device = host
+            .output_devices()?
+            .nth(self.output_device_index.unwrap())
+            .context("出力デバイスの選択に失敗しました")?;
+
+        // ハイパーパラメータの設定
+        let hparams = Arc::new(AudioParams::new(
+            self.model_sample_rate,
+            self.buffer_size,
+            self.overlap_length,
+            self.source_speaker_id,
+            self.target_speaker_id,
+            self.cutoff_enabled,
+            self.cutoff_freq,
+        ));
+
+        // チャネルの作成
+        let (input_tx, input_rx) = bounded::<Vec<f32>>(0);
+        let (output_tx, output_rx) = bounded::<Vec<f32>>(0);
+
+        // 入力ストリームの作成
+        println!("入力ストリームを作成中...");
+        let input_stream = record_and_resample(Arc::clone(&hparams), input_device, input_tx)?;
+
+        // 処理スレッドの開始
+        println!("処理スレッドを開始します...");
+        let hparams_clone = Arc::clone(&hparams);
+        let session_clone = Arc::clone(&session);
+        let processing_handle = thread::spawn(move || {
+            #[cfg(target_os = "windows")]
+            {
+                // 処理スレッド内で優先度を設定
+                let current_thread = unsafe { GetCurrentThread() };
+                let success =
+                    unsafe { SetThreadPriority(current_thread, THREAD_PRIORITY_TIME_CRITICAL) };
+                match success {
+                    Ok(_) => {
+                        println!(
+                            "処理スレッドの優先度を THREAD_PRIORITY_TIME_CRITICAL に設定しました。"
+                        )
+                    }
+                    Err(e) => eprintln!("処理スレッドの優先度設定に失敗しました。エラー: {:?}", e),
+                }
+            }
+
+            if let Err(e) = processing_thread(hparams_clone, session_clone, input_rx, output_tx) {
+                eprintln!("処理スレッドでエラーが発生しました: {:?}", e);
+            }
+        });
+
+        // 出力ストリームの作成
+        println!("出力ストリームを作成中...");
+        let output_stream = play_output(Arc::clone(&hparams), output_device, output_rx)?;
+
+        // ストリームの開始
+        println!("入力ストリームを再生開始...");
+        input_stream
+            .play()
+            .context("入力ストリームの再生に失敗しました")?;
+        println!("出力ストリームを再生開始...");
+        output_stream
+            .play()
+            .context("出力ストリームの再生に失敗しました")?;
+
+        // ハンドルの保存
+        self.input_stream = Some(input_stream);
+        self.output_stream = Some(output_stream);
+        self.processing_handle = Some(processing_handle);
+
+        Ok(())
+    }
+
+    fn stop_processing(&mut self) {
+        // ストリームを停止
+        self.input_stream.take();
+        self.output_stream.take();
+
+        // 処理スレッドを終了
+        if let Some(handle) = self.processing_handle.take() {
+            // 処理スレッドが終了するまで待機
+            handle.join().expect("処理スレッドの終了に失敗しました");
+        }
+
+        self.is_running = false;
+    }
+}
+
+impl eframe::App for MyApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.heading("MMVC Client");
+
+            // エラーメッセージの表示
+            if let Some(ref msg) = self.error_message {
+                ui.colored_label(egui::Color32::RED, msg);
+            }
+
+            // ONNXモデルファイルの選択
+            ui.horizontal(|ui| {
+                ui.label("ONNX Model File:");
+                if ui.button("Select...").clicked() {
+                    // ファイルダイアログを開く
+                    if let Some(path) = rfd::FileDialog::new().pick_file() {
+                        self.onnx_file = path.to_string_lossy().to_string();
+                    }
+                }
+                ui.label(&self.onnx_file);
+            });
+
+            // スピーカーIDの入力
+            ui.horizontal(|ui| {
+                ui.label("Source Speaker ID:");
+                ui.add(egui::DragValue::new(&mut self.source_speaker_id));
+                ui.label("Target Speaker ID:");
+                ui.add(egui::DragValue::new(&mut self.target_speaker_id));
+            });
+
+            // デバイスの選択
+            ui.horizontal(|ui| {
+                ui.label("Input Device:");
+                ComboBox::from_id_source("input_device")
+                    .selected_text(
+                        self.input_device_index
+                            .and_then(|i| self.input_device_names.get(i))
+                            .unwrap_or(&"Select Input Device".to_string())
+                            .clone(),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (i, name) in self.input_device_names.iter().enumerate() {
+                            ui.selectable_value(&mut self.input_device_index, Some(i), name);
+                        }
+                    });
+            });
+
+            ui.horizontal(|ui| {
+                ui.label("Output Device:");
+                ComboBox::from_id_source("output_device")
+                    .selected_text(
+                        self.output_device_index
+                            .and_then(|i| self.output_device_names.get(i))
+                            .unwrap_or(&"Select Output Device".to_string())
+                            .clone(),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (i, name) in self.output_device_names.iter().enumerate() {
+                            ui.selectable_value(&mut self.output_device_index, Some(i), name);
+                        }
+                    });
+            });
+
+            // カットオフフィルター
+            ui.checkbox(&mut self.cutoff_enabled, "Enable Cutoff Filter");
+            if self.cutoff_enabled {
+                ui.horizontal(|ui| {
+                    ui.label("Cutoff Frequency (Hz):");
+                    ui.add(egui::DragValue::new(&mut self.cutoff_freq));
+                });
+            }
+
+            // その他のパラメータ
+            ui.horizontal(|ui| {
+                ui.label("Model Sample Rate:");
+                ui.add(egui::DragValue::new(&mut self.model_sample_rate));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Buffer Size:");
+                ui.add(egui::DragValue::new(&mut self.buffer_size));
+            });
+            ui.horizontal(|ui| {
+                ui.label("Overlap Length:");
+                ui.add(egui::DragValue::new(&mut self.overlap_length));
+            });
+
+            // スタート/ストップボタン
+            if !self.is_running {
+                let is_ready_to_start = !self.onnx_file.is_empty()
+                    && self.input_device_index.is_some()
+                    && self.output_device_index.is_some();
+
+                if ui
+                    .add_enabled(is_ready_to_start, egui::Button::new("Start"))
+                    .clicked()
+                {
+                    // 処理を開始
+                    match self.start_processing() {
+                        Ok(_) => {
+                            self.is_running = true;
+                            self.error_message = None;
+                        }
+                        Err(e) => {
+                            self.error_message =
+                                Some(format!("Failed to start processing: {:?}", e));
+                        }
+                    }
+                }
+            } else {
+                if ui.button("Stop").clicked() {
+                    // 処理を停止
+                    self.stop_processing();
+                    self.is_running = false;
+                }
+            }
+        });
+    }
+}
+
+fn main() -> Result<()> {
+    let options = eframe::NativeOptions::default();
+    eframe::run_native(
+        "MMVC Client",
+        options,
+        Box::new(|cc| Ok(Box::new(MyApp::new(cc)))),
+    )
+    .unwrap_or_else(|e| {
+        eprintln!("エラーが発生しました: {}", e);
+    });
+    Ok(())
 }
