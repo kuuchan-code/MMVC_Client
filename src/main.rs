@@ -450,7 +450,11 @@ impl MyApp {
             "NotoSansJP".to_owned(),
             FontData::from_static(include_bytes!("../assets/fonts/NotoSansJP-Regular.ttf")),
         );
-
+        // スタイルのカスタマイズ
+        let mut style = (*cc.egui_ctx.style()).clone();
+        style.spacing.item_spacing = egui::vec2(10.0, 10.0); // アイテム間のスペースを調整
+        style.spacing.window_margin = egui::Margin::symmetric(10.0, 10.0); // ウィンドウの余白を調整
+        cc.egui_ctx.set_style(style);
         // プロポーショナルフォントファミリーに追加
         fonts
             .families
@@ -638,7 +642,6 @@ impl MyApp {
         self.is_running = false;
     }
 }
-
 impl eframe::App for MyApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -649,110 +652,158 @@ impl eframe::App for MyApp {
                 ui.colored_label(egui::Color32::RED, msg);
             }
 
+            ui.separator();
+
             // ONNXモデルファイルの選択
-            ui.horizontal(|ui| {
-                ui.label("ONNXモデルファイル:");
-                if ui.button("選択...").clicked() {
-                    // ファイルダイアログを開く
-                    if let Some(path) = rfd::FileDialog::new().pick_file() {
-                        self.onnx_file = path.to_string_lossy().to_string();
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label("ONNXモデルファイル:");
+                    if ui.button("選択...").clicked() {
+                        // ファイルダイアログを開く
+                        if let Some(path) = rfd::FileDialog::new().pick_file() {
+                            self.onnx_file = path.to_string_lossy().to_string();
+                        }
                     }
-                }
+                });
                 ui.label(&self.onnx_file);
             });
 
+            ui.separator();
+
             // スピーカーIDの入力
-            ui.horizontal(|ui| {
-                ui.label("ソーススピーカーID:");
-                ui.add(egui::DragValue::new(&mut self.source_speaker_id));
-                ui.label("ターゲットスピーカーID:");
-                ui.add(egui::DragValue::new(&mut self.target_speaker_id));
+            ui.group(|ui| {
+                egui::Grid::new("speaker_ids")
+                    .num_columns(2)
+                    .spacing([40.0, 10.0])
+                    .show(ui, |ui| {
+                        ui.label("ソーススピーカーID:");
+                        ui.add(egui::DragValue::new(&mut self.source_speaker_id));
+                        ui.end_row();
+
+                        ui.label("ターゲットスピーカーID:");
+                        ui.add(egui::DragValue::new(&mut self.target_speaker_id));
+                        ui.end_row();
+                    });
             });
+
+            ui.separator();
 
             // デバイスの選択
-            ui.horizontal(|ui| {
-                ui.label("入力デバイス:");
-                ComboBox::from_id_source("input_device")
-                    .selected_text(
-                        self.input_device_index
-                            .and_then(|i| self.input_device_names.get(i))
-                            .unwrap_or(&"入力デバイスを選択".to_string())
-                            .clone(),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (i, name) in self.input_device_names.iter().enumerate() {
-                            ui.selectable_value(&mut self.input_device_index, Some(i), name);
-                        }
-                    });
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label("入力デバイス:");
+                    ComboBox::from_id_source("input_device")
+                        .selected_text(
+                            self.input_device_index
+                                .and_then(|i| self.input_device_names.get(i))
+                                .unwrap_or(&"入力デバイスを選択".to_string())
+                                .clone(),
+                        )
+                        .width(200.0) // 幅を固定
+                        .show_ui(ui, |ui| {
+                            for (i, name) in self.input_device_names.iter().enumerate() {
+                                ui.selectable_value(&mut self.input_device_index, Some(i), name);
+                            }
+                        });
+                });
+
+                ui.horizontal(|ui| {
+                    ui.label("出力デバイス:");
+                    ComboBox::from_id_source("output_device")
+                        .selected_text(
+                            self.output_device_index
+                                .and_then(|i| self.output_device_names.get(i))
+                                .unwrap_or(&"出力デバイスを選択".to_string())
+                                .clone(),
+                        )
+                        .width(200.0) // 幅を固定
+                        .show_ui(ui, |ui| {
+                            for (i, name) in self.output_device_names.iter().enumerate() {
+                                ui.selectable_value(&mut self.output_device_index, Some(i), name);
+                            }
+                        });
+                });
             });
 
-            ui.horizontal(|ui| {
-                ui.label("出力デバイス:");
-                ComboBox::from_id_source("output_device")
-                    .selected_text(
-                        self.output_device_index
-                            .and_then(|i| self.output_device_names.get(i))
-                            .unwrap_or(&"出力デバイスを選択".to_string())
-                            .clone(),
-                    )
-                    .show_ui(ui, |ui| {
-                        for (i, name) in self.output_device_names.iter().enumerate() {
-                            ui.selectable_value(&mut self.output_device_index, Some(i), name);
-                        }
-                    });
-            });
+            ui.separator();
 
             // カットオフフィルター
             ui.checkbox(&mut self.cutoff_enabled, "カットオフフィルターを有効にする");
             if self.cutoff_enabled {
                 ui.horizontal(|ui| {
                     ui.label("カットオフ周波数 (Hz):");
-                    ui.add(egui::DragValue::new(&mut self.cutoff_freq));
+                    ui.add(egui::DragValue::new(&mut self.cutoff_freq).speed(10.0));
                 });
             }
 
+            ui.separator();
+
             // その他のパラメータ
-            ui.horizontal(|ui| {
-                ui.label("モデルのサンプルレート:");
-                ui.add(egui::DragValue::new(&mut self.model_sample_rate));
-            });
-            ui.horizontal(|ui| {
-                ui.label("バッファサイズ:");
-                ui.add(egui::DragValue::new(&mut self.buffer_size));
-            });
-            ui.horizontal(|ui| {
-                ui.label("オーバーラップ長:");
-                ui.add(egui::DragValue::new(&mut self.overlap_length));
+            ui.group(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label("モデルのサンプルレート:");
+                    ui.add(
+                        egui::DragValue::new(&mut self.model_sample_rate)
+                            .speed(1000)
+                            .range(8000..=48000),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("バッファサイズ:");
+                    ui.add(
+                        egui::DragValue::new(&mut self.buffer_size)
+                            .speed(256)
+                            .range(256..=16384),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("オーバーラップ長:");
+                    ui.add(
+                        egui::DragValue::new(&mut self.overlap_length)
+                            .speed(128)
+                            .range(128..=2048),
+                    );
+                });
             });
 
-            // スタート/ストップボタン
-            if !self.is_running {
-                let is_ready_to_start = !self.onnx_file.is_empty()
-                    && self.input_device_index.is_some()
-                    && self.output_device_index.is_some();
+            ui.separator();
 
-                if ui
-                    .add_enabled(is_ready_to_start, egui::Button::new("開始"))
-                    .clicked()
-                {
-                    // 処理を開始
-                    match self.start_processing() {
-                        Ok(_) => {
-                            self.is_running = true;
-                            self.error_message = None;
+            // スタート/ストップボタンを中央揃えにする
+            ui.with_layout(
+                egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                |ui| {
+                    if !self.is_running {
+                        let is_ready_to_start = !self.onnx_file.is_empty()
+                            && self.input_device_index.is_some()
+                            && self.output_device_index.is_some();
+
+                        if ui
+                            .add_enabled(
+                                is_ready_to_start,
+                                egui::Button::new("開始").min_size(egui::Vec2::new(100.0, 30.0)),
+                            )
+                            .clicked()
+                        {
+                            // 処理を開始
+                            match self.start_processing() {
+                                Ok(_) => {
+                                    self.is_running = true;
+                                    self.error_message = None;
+                                }
+                                Err(e) => {
+                                    self.error_message =
+                                        Some(format!("処理の開始に失敗しました: {:?}", e));
+                                }
+                            }
                         }
-                        Err(e) => {
-                            self.error_message =
-                                Some(format!("Failed to start processing: {:?}", e));
+                    } else {
+                        if ui.button("停止").clicked() {
+                            // 処理を停止
+                            self.stop_processing();
                         }
                     }
-                }
-            } else {
-                if ui.button("停止").clicked() {
-                    // 処理を停止
-                    self.stop_processing();
-                }
-            }
+                },
+            );
         });
     }
 }
