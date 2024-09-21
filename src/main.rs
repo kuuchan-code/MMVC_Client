@@ -271,7 +271,7 @@ fn record_and_resample(
         1,
         input_sample_rate as usize,
         hparams.model_sample_rate as usize,
-        5,
+        10,
     )
     .map_err(|e| anyhow::anyhow!("リサンプリザーの初期化に失敗しました: {:?}", e))?;
 
@@ -354,7 +354,7 @@ fn play_output(
         1,
         model_sample_rate as usize,
         output_sample_rate as usize,
-        5,
+        10,
     )
     .map_err(|e| anyhow::anyhow!("リサンプリザーの初期化に失敗しました: {:?}", e))?;
     let mut output_buffer: VecDeque<f32> = VecDeque::with_capacity(max_buffer_size);
@@ -648,7 +648,8 @@ impl MyApp {
         // 入力ストリームの作成
         println!("入力ストリームを作成中...");
         let delays_clone = Arc::clone(&self.delays); // 追加
-        let input_stream = record_and_resample(Arc::clone(&hparams), input_device, input_tx, delays_clone)?; // 修正
+        let input_stream =
+            record_and_resample(Arc::clone(&hparams), input_device, input_tx, delays_clone)?; // 修正
 
         // 処理スレッドの開始
         println!("処理スレッドを開始します...");
@@ -672,9 +673,13 @@ impl MyApp {
                 }
             }
 
-            if let Err(e) =
-                processing_thread(hparams_clone, session_clone, input_rx, output_tx, delays_clone)
-            {
+            if let Err(e) = processing_thread(
+                hparams_clone,
+                session_clone,
+                input_rx,
+                output_tx,
+                delays_clone,
+            ) {
                 eprintln!("処理スレッドでエラーが発生しました: {:?}", e);
             }
         });
@@ -902,7 +907,13 @@ impl eframe::App for MyApp {
                         ui.separator();
                         ui.label("遅延詳細:");
                         ui.horizontal(|ui| {
-                            ui.label(format!("処理遅延: {:.2} ms", delays_guard.processing_delay_ms));
+                            ui.label(format!("バッファ遅延: {:.2} ms",         self.buffer_size as f32 /self.model_sample_rate as f32  * 1000.0));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(format!("オーバーラップ遅延: {:.2} ms", self.overlap_length as f32 /self.model_sample_rate as f32 * 1000.0));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label(format!("処理遅延 (推論遅延含む): {:.2} ms", delays_guard.processing_delay_ms));
                         });
                         ui.horizontal(|ui| {
                             ui.label(format!("推論遅延: {:.2} ms", delays_guard.inference_delay_ms));
