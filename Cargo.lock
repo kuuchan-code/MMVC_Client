@@ -2207,6 +2207,7 @@ dependencies = [
  "egui",
  "env_logger",
  "ndarray",
+ "once_cell",
  "ort",
  "rfd",
  "rubato",

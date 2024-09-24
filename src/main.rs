@@ -5,6 +5,7 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use eframe::{self};
 use egui::{self, Color32, ComboBox, ProgressBar, Slider};
 use ndarray::{Array1, Array3, CowArray};
+use once_cell::sync::Lazy;
 use ort::{
     tensor::OrtOwnedTensor, Environment, ExecutionProvider, GraphOptimizationLevel, Session,
     SessionBuilder, Value,
@@ -26,7 +27,8 @@ use windows::Win32::System::Threading::{
 // 定数の定義
 const FFT_WINDOW_SIZE: usize = 512;
 const HOP_SIZE: usize = 128;
-
+static FFT_PLANNER: Lazy<Mutex<FftPlanner<f32>>> =
+    Lazy::new(|| Mutex::new(FftPlanner::<f32>::new()));
 // AudioParams構造体の定義
 struct AudioParams {
     model_sample_rate: u32, // サンプルレートはモデルへの入力用
@@ -206,9 +208,9 @@ fn apply_stft_with_hann_window(audio_signal: &[f32], hparams: &AudioParams) -> A
     let num_frames = (audio_signal.len() - fft_size) / hop_size + 1;
     let mut spectrogram = Array3::<f32>::zeros((1, fft_size / 2 + 1, num_frames));
 
-    // FFTのプランナーを初期化
-    let mut fft_planner = FftPlanner::<f32>::new();
-    let fft = fft_planner.plan_fft_forward(fft_size);
+    // グローバルなFFTプランナーを取得
+    let mut planner = FFT_PLANNER.lock().unwrap();
+    let fft = planner.plan_fft_forward(fft_size);
 
     let mut input_buffer = vec![Complex::zero(); fft_size];
     // scratchバッファの追加
@@ -388,7 +390,6 @@ struct Sola {
     overlap_size: usize,
     sola_search_frame: usize,
     prev_wav: Vec<f32>,
-
 }
 
 impl Sola {
@@ -439,9 +440,7 @@ impl Sola {
             .max_by(|(_, (nom, den)), (_, (nom2, den2))| {
                 let val1 = *nom / *den;
                 let val2 = *nom2 / *den2;
-                val1
-                    .partial_cmp(&val2)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                val1.partial_cmp(&val2).unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|(idx, _)| idx)
             .unwrap_or(0)
@@ -595,7 +594,7 @@ impl MyApp {
             cutoff_freq: 150.0,
             model_sample_rate: 24000,
             buffer_size: 8192,
-            overlap_length: 2048,
+            overlap_length: 1024,
 
             input_device_names,
             output_device_names,
