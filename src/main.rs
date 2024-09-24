@@ -1077,8 +1077,7 @@ impl PSola {
             prev_pitch_period: 0,
             sample_rate,
         }
-    }
-    fn merge(&mut self, wav: &[f32]) -> Vec<f32> {
+    }fn merge(&mut self, wav: &[f32]) -> Vec<f32> {
         // Pitch detection
         let f0 = yin_pitch_detect(wav, self.sample_rate).unwrap_or(0.0);
         let current_pitch_period = if f0 > 0.0 {
@@ -1086,51 +1085,51 @@ impl PSola {
         } else {
             self.prev_pitch_period
         };
-
+    
         if self.prev_wav.is_empty() {
             let output_wav = wav[..wav.len() - self.overlap_size].to_vec();
             self.prev_wav = wav[wav.len() - self.overlap_size..].to_vec();
             self.prev_pitch_period = current_pitch_period;
             return output_wav;
         }
-
+    
         // Ensure prev_wav length is at least overlap_size
         if self.prev_wav.len() < self.overlap_size {
-            // Handle cases where prev_wav is shorter than overlap_size
             self.prev_wav.resize(self.overlap_size, 0.0);
         }
-
+    
         // Determine overlap position for PSOLA
+        let search_range = current_pitch_period;
         let max_offset = self.prev_wav.len() - self.overlap_size;
         let (best_offset, _) = (0..=max_offset)
             .map(|offset| {
                 let prev_segment = &self.prev_wav[offset..offset + self.overlap_size];
                 let current_segment = &wav[..self.overlap_size];
-
+    
                 let corr = Self::calculate_correlation(prev_segment, current_segment);
                 (offset, corr)
             })
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
             .unwrap_or((0, 0.0));
-
-        // Crossfade segments
+    
+        // Crossfade segments with normalization
         let prev_tail = &self.prev_wav[best_offset..best_offset + self.overlap_size];
         let current_head = &wav[..self.overlap_size];
         let crossfaded = Self::crossfade(prev_tail, current_head);
-
+    
         // Merge
         let mut output_wav = self.prev_wav[..best_offset].to_vec();
         output_wav.extend(crossfaded);
-
+    
         // Adjust the amount of data taken from wav after the crossfade
         let expected_output_length = wav.len() - self.overlap_size;
         let remaining_length = expected_output_length - output_wav.len();
         output_wav.extend(&wav[self.overlap_size..self.overlap_size + remaining_length]);
-
+    
         // Prepare for next iteration
         self.prev_wav = wav[wav.len() - self.overlap_size..].to_vec();
         self.prev_pitch_period = current_pitch_period;
-
+    
         output_wav
     }
 
