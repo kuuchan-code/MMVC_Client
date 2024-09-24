@@ -135,7 +135,8 @@ fn parabolic_interpolation(y0: f32, y1: f32, y2: f32) -> f32 {
     } else {
         (y0 - y2) / denominator
     }
-}fn processing_thread(
+}
+fn processing_thread(
     hparams: Arc<AudioParams>,
     session: Arc<Session>,
     input_rx: Receiver<Vec<f32>>,
@@ -185,7 +186,6 @@ fn parabolic_interpolation(y0: f32, y1: f32, y2: f32) -> f32 {
     }
     Ok(())
 }
-
 
 // 音声変換処理のメイン関数
 fn audio_transform(
@@ -1078,9 +1078,8 @@ impl PSola {
             sample_rate,
         }
     }
-
     fn merge(&mut self, wav: &[f32]) -> Vec<f32> {
-        // ピッチ検出
+        // Pitch detection
         let f0 = yin_pitch_detect(wav, self.sample_rate).unwrap_or(0.0);
         let current_pitch_period = if f0 > 0.0 {
             (self.sample_rate as f32 / f0) as usize
@@ -1095,13 +1094,18 @@ impl PSola {
             return output_wav;
         }
 
-        // PSOLAのためのオーバーラップ位置の決定
-        let search_range = current_pitch_period;
-        let max_offset = self.prev_wav.len().saturating_sub(search_range);
+        // Ensure prev_wav length is at least overlap_size
+        if self.prev_wav.len() < self.overlap_size {
+            // Handle cases where prev_wav is shorter than overlap_size
+            self.prev_wav.resize(self.overlap_size, 0.0);
+        }
+
+        // Determine overlap position for PSOLA
+        let max_offset = self.prev_wav.len() - self.overlap_size;
         let (best_offset, _) = (0..=max_offset)
             .map(|offset| {
-                let prev_segment = &self.prev_wav[offset..offset + search_range];
-                let current_segment = &wav[..search_range.min(wav.len())];
+                let prev_segment = &self.prev_wav[offset..offset + self.overlap_size];
+                let current_segment = &wav[..self.overlap_size];
 
                 let corr = Self::calculate_correlation(prev_segment, current_segment);
                 (offset, corr)
@@ -1109,17 +1113,21 @@ impl PSola {
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
             .unwrap_or((0, 0.0));
 
-        // クロスフェードの適用
-        let prev_tail = &self.prev_wav[best_offset..];
-        let current_head = &wav[..prev_tail.len()];
+        // Crossfade segments
+        let prev_tail = &self.prev_wav[best_offset..best_offset + self.overlap_size];
+        let current_head = &wav[..self.overlap_size];
         let crossfaded = Self::crossfade(prev_tail, current_head);
 
-        // マージ
+        // Merge
         let mut output_wav = self.prev_wav[..best_offset].to_vec();
         output_wav.extend(crossfaded);
-        output_wav.extend(&wav[prev_tail.len()..wav.len() - self.overlap_size]);
 
-        // 次回のためにデータを保持
+        // Adjust the amount of data taken from wav after the crossfade
+        let expected_output_length = wav.len() - self.overlap_size;
+        let remaining_length = expected_output_length - output_wav.len();
+        output_wav.extend(&wav[self.overlap_size..self.overlap_size + remaining_length]);
+
+        // Prepare for next iteration
         self.prev_wav = wav[wav.len() - self.overlap_size..].to_vec();
         self.prev_pitch_period = current_pitch_period;
 
