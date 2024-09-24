@@ -387,6 +387,7 @@ fn play_output(
 
     Ok(stream)
 }
+
 struct Sola {
     overlap_size: usize,
     sola_search_frame: usize,
@@ -398,7 +399,7 @@ impl Sola {
         Self {
             overlap_size,
             sola_search_frame,
-            prev_wav: vec![0.0; overlap_size], // 初期化
+            prev_wav: vec![0.0; overlap_size],
         }
     }
 
@@ -417,7 +418,8 @@ impl Sola {
             &self.prev_wav[sola_offset..sola_offset + self.sola_search_frame];
         let crossfaded = Self::crossfade(sola_search_region, prev_sola_match_region);
 
-        let mut sola_merged_wav = Vec::new();
+        let total_len = sola_offset + crossfaded.len() + wav[self.sola_search_frame..].len();
+        let mut sola_merged_wav = Vec::with_capacity(total_len);
         sola_merged_wav.extend_from_slice(&self.prev_wav[..sola_offset]);
         sola_merged_wav.extend_from_slice(&crossfaded);
         sola_merged_wav.extend_from_slice(&wav[self.sola_search_frame..]);
@@ -438,46 +440,67 @@ impl Sola {
             .zip(cor_den)
             .enumerate()
             .max_by(|(_, (nom, den)), (_, (nom2, den2))| {
-                (*nom / *den).partial_cmp(&(*nom2 / *den2)).unwrap_or(std::cmp::Ordering::Equal)
+                let val1 = *nom / *den;
+                let val2 = *nom2 / *den2;
+                val1
+                    .partial_cmp(&val2)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|(idx, _)| idx)
             .unwrap_or(0)
     }
-    
-    
 
     fn calculate_root_energy(a: &[f32], len: usize) -> Vec<f32> {
         let n = a.len();
-        let mut result = vec![0.0; n - len + 1];
-        for i in 0..(n - len + 1) {
-            result[i] = a[i..i + len].iter().map(|&x| x * x).sum();
+        let size = n - len + 1;
+        let mut result = Vec::with_capacity(size);
+        let mut sum = 0.0;
+
+        for i in 0..len {
+            let val = a[i];
+            sum += val * val;
         }
+        result.push(sum);
+
+        for i in len..n {
+            let val_add = a[i];
+            let val_sub = a[i - len];
+            sum += val_add * val_add - val_sub * val_sub;
+            result.push(sum);
+        }
+
         result
     }
 
     fn convolve(a: &[f32], b: &[f32]) -> Vec<f32> {
         let n = a.len();
         let m = b.len();
-        let mut result = vec![0.0; n - m + 1];
-        for i in 0..(n - m + 1) {
-            result[i] = a[i..i + m]
-                .iter()
-                .zip(b)
-                .map(|(&x, &y)| x * y)
-                .sum();
+        let size = n - m + 1;
+        let mut result = Vec::with_capacity(size);
+
+        for i in 0..size {
+            let mut sum = 0.0;
+            for j in 0..m {
+                sum += a[i + j] * b[j];
+            }
+            result.push(sum);
         }
+
         result
     }
 
     fn crossfade(cur_wav: &[f32], prev_wav: &[f32]) -> Vec<f32> {
         let len = prev_wav.len();
         let mut output_wav = Vec::with_capacity(len);
+
         for i in 0..len {
             let percent = i as f32 / len as f32;
-            let prev_strength = (percent * 0.5 * PI).cos().powi(2);
-            let cur_strength = ((1.0 - percent) * 0.5 * PI).cos().powi(2);
+            let cos_val = (percent * PI).cos();
+            let prev_strength = (1.0 + cos_val) * 0.5;
+            let cur_strength = (1.0 - cos_val) * 0.5;
             output_wav.push(prev_wav[i] * prev_strength + cur_wav[i] * cur_strength);
         }
+
         output_wav
     }
 }
