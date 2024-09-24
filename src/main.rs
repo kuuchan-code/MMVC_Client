@@ -83,7 +83,7 @@ fn processing_thread(
     delays: Arc<Mutex<Delays>>, // 追加
 ) -> Result<()> {
     // Set sola_search_frame equal to overlap_length
-    let sola_search_frame = hparams.overlap_length;
+    let sola_search_frame = hparams.overlap_length / 2;
     let overlap_size = hparams.overlap_length;
     let mut sola = Sola::new(overlap_size, sola_search_frame);
     let mut prev_input_tail: Vec<f32> = Vec::new();
@@ -423,7 +423,7 @@ impl Sola {
             })
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
             .unwrap_or((0, 0.0));
-
+        println!("{best_offset}");
         // クロスフェードの適用
         let prev_tail = &self.prev_wav[best_offset..];
         let current_head = &wav[..prev_tail.len()];
