@@ -725,10 +725,10 @@ impl MyApp {
     }
 
     fn calculate_quality(&self) -> f32 {
-        let min_buffer = 2048.0;
+        let min_buffer = 4096.0;
         let max_buffer = 16384.0;
         let min_overlap = min_buffer / 8.0;
-        let max_overlap = max_buffer / 4.0;
+        let max_overlap = (max_buffer / 4.0) + (max_buffer / 16.0) - 164.0;
 
         let buffer_factor =
             ((self.buffer_size as f32 - min_buffer) / (max_buffer - min_buffer)).clamp(0.0, 1.0);
@@ -878,7 +878,7 @@ impl eframe::App for MyApp {
                         ui.horizontal(|ui| {
                             ui.label("バッファサイズ:");
                             ui.add(
-                                Slider::new(&mut self.buffer_size, 2048..=16384)
+                                Slider::new(&mut self.buffer_size, 4096..=16384)
                                     .step_by(512.0) // 512刻みで調整可能に
                                     .text("バイト")
                             )
@@ -891,7 +891,7 @@ impl eframe::App for MyApp {
                             ui.add(
                                 Slider::new(
                                     &mut self.overlap_length,
-                                    (self.buffer_size / 8)..=(self.buffer_size / 4),
+                                    (self.buffer_size / 8)..=(self.buffer_size / 4) + (self.buffer_size / 16) - 164,
                                 )
                                 .step_by(128.0) // 128刻みで調整可能に
                                 .text("バイト")
