@@ -594,8 +594,8 @@ impl MyApp {
             cutoff_enabled: false,
             cutoff_freq: 150.0,
             model_sample_rate: 24000,
-            buffer_size: 6656,
-            overlap_length: 1024,
+            buffer_size: 8192,
+            overlap_length: 2048,
 
             input_device_names,
             output_device_names,
