@@ -91,11 +91,7 @@ fn processing_thread(
     while let Ok(mut input_signal) = input_rx.recv() {
         // 入力信号の前後処理
         if !prev_input_tail.is_empty() {
-            let mut extended_signal =
-                Vec::with_capacity(prev_input_tail.len() + input_signal.len());
-            extended_signal.extend_from_slice(&prev_input_tail);
-            extended_signal.extend_from_slice(&input_signal);
-            input_signal = extended_signal;
+            input_signal.splice(0..0, prev_input_tail.iter().cloned());
         }
 
         // 音声変換処理の遅延計測開始
@@ -261,7 +257,7 @@ fn record_and_resample(
         1,
         input_sample_rate as usize,
         hparams.model_sample_rate as usize,
-        10,
+        5,
     )
     .map_err(|e| anyhow::anyhow!("リサンプリザーの初期化に失敗しました: {:?}", e))?;
 
@@ -344,7 +340,7 @@ fn play_output(
         1,
         model_sample_rate as usize,
         output_sample_rate as usize,
-        10,
+        5,
     )
     .map_err(|e| anyhow::anyhow!("リサンプリザーの初期化に失敗しました: {:?}", e))?;
     let mut output_buffer: VecDeque<f32> = VecDeque::with_capacity(max_buffer_size);
