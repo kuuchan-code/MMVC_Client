@@ -388,6 +388,7 @@ struct Sola {
     overlap_size: usize,
     sola_search_frame: usize,
     prev_wav: Vec<f32>,
+
 }
 
 impl Sola {
@@ -593,8 +594,8 @@ impl MyApp {
             cutoff_enabled: false,
             cutoff_freq: 150.0,
             model_sample_rate: 24000,
-            buffer_size: 6144,
-            overlap_length: 1536,
+            buffer_size: 6656,
+            overlap_length: 1024,
 
             input_device_names,
             output_device_names,
