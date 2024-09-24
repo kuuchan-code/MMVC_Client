@@ -387,8 +387,6 @@ fn play_output(
 
     Ok(stream)
 }
-
-// SOLAアルゴリズムの実装
 struct Sola {
     overlap_size: usize,
     sola_search_frame: usize,
@@ -400,63 +398,87 @@ impl Sola {
         Self {
             overlap_size,
             sola_search_frame,
-            prev_wav: Vec::new(),
+            prev_wav: vec![0.0; overlap_size], // 初期化
         }
     }
 
     fn merge(&mut self, wav: &[f32]) -> Vec<f32> {
         if self.prev_wav.is_empty() {
-            let output_wav = wav[..wav.len() - self.overlap_size].to_vec();
             self.prev_wav = wav[wav.len() - self.overlap_size..].to_vec();
-            return output_wav;
+            return wav[..wav.len() - self.overlap_size].to_vec();
         }
 
-        let search_range = self.sola_search_frame.min(self.prev_wav.len());
-        let max_offset = self.prev_wav.len().saturating_sub(search_range);
-        let (best_offset, _) = (0..=max_offset)
-            .map(|offset| {
-                let prev_segment = &self.prev_wav[offset..offset + search_range];
-                let current_segment = &wav[..search_range];
+        let sola_search_region = &wav[..self.sola_search_frame];
+        let cor_nom = Self::convolve(&self.prev_wav, sola_search_region);
+        let cor_den = Self::calculate_root_energy(&self.prev_wav, self.sola_search_frame);
+        let sola_offset = Self::calculate_sola_offset(&cor_nom, &cor_den);
 
-                let corr = Self::calculate_correlation(prev_segment, current_segment);
-                (offset, corr)
-            })
-            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
-            .unwrap_or((0, 0.0));
-        println!("{best_offset}");
-        // クロスフェードの適用
-        let prev_tail = &self.prev_wav[best_offset..];
-        let current_head = &wav[..prev_tail.len()];
-        let crossfaded = Self::crossfade(prev_tail, current_head);
+        let prev_sola_match_region =
+            &self.prev_wav[sola_offset..sola_offset + self.sola_search_frame];
+        let crossfaded = Self::crossfade(sola_search_region, prev_sola_match_region);
 
-        // マージ
-        let mut output_wav = self.prev_wav[..best_offset].to_vec();
-        output_wav.extend(crossfaded);
-        output_wav.extend(&wav[prev_tail.len()..wav.len() - self.overlap_size]);
+        let mut sola_merged_wav = Vec::new();
+        sola_merged_wav.extend_from_slice(&self.prev_wav[..sola_offset]);
+        sola_merged_wav.extend_from_slice(&crossfaded);
+        sola_merged_wav.extend_from_slice(&wav[self.sola_search_frame..]);
 
-        // 次回のためにデータを保持
-        self.prev_wav = wav[wav.len() - self.overlap_size..].to_vec();
+        let output_len = sola_merged_wav.len() - (sola_offset + self.overlap_size);
+        let output_wav = sola_merged_wav[..output_len].to_vec();
+
+        let prev_wav_start = wav.len() - (self.overlap_size + sola_offset);
+        let prev_wav_end = wav.len() - sola_offset;
+        self.prev_wav = wav[prev_wav_start..prev_wav_end].to_vec();
 
         output_wav
     }
 
-    fn calculate_correlation(a: &[f32], b: &[f32]) -> f32 {
-        let dot_product = a.iter().zip(b).map(|(&x, &y)| x * y).sum::<f32>();
-        let norm_a = a.iter().map(|&x| x * x).sum::<f32>().sqrt();
-        let norm_b = b.iter().map(|&x| x * x).sum::<f32>().sqrt();
-        dot_product / (norm_a * norm_b + 1e-8)
+    fn calculate_sola_offset(cor_nom: &[f32], cor_den: &[f32]) -> usize {
+        cor_nom
+            .iter()
+            .zip(cor_den)
+            .enumerate()
+            .max_by(|(_, (nom, den)), (_, (nom2, den2))| {
+                (*nom / *den).partial_cmp(&(*nom2 / *den2)).unwrap_or(std::cmp::Ordering::Equal)
+            })
+            .map(|(idx, _)| idx)
+            .unwrap_or(0)
+    }
+    
+    
+
+    fn calculate_root_energy(a: &[f32], len: usize) -> Vec<f32> {
+        let n = a.len();
+        let mut result = vec![0.0; n - len + 1];
+        for i in 0..(n - len + 1) {
+            result[i] = a[i..i + len].iter().map(|&x| x * x).sum();
+        }
+        result
     }
 
-    fn crossfade(prev_wav: &[f32], cur_wav: &[f32]) -> Vec<f32> {
+    fn convolve(a: &[f32], b: &[f32]) -> Vec<f32> {
+        let n = a.len();
+        let m = b.len();
+        let mut result = vec![0.0; n - m + 1];
+        for i in 0..(n - m + 1) {
+            result[i] = a[i..i + m]
+                .iter()
+                .zip(b)
+                .map(|(&x, &y)| x * y)
+                .sum();
+        }
+        result
+    }
+
+    fn crossfade(cur_wav: &[f32], prev_wav: &[f32]) -> Vec<f32> {
         let len = prev_wav.len();
-        (0..len)
-            .map(|i| {
-                let t = i as f32 / (len - 1) as f32;
-                let fade_in = 0.5 - 0.5 * (PI * t).cos();
-                let fade_out = 1.0 - fade_in;
-                prev_wav[i] * fade_out + cur_wav[i] * fade_in
-            })
-            .collect()
+        let mut output_wav = Vec::with_capacity(len);
+        for i in 0..len {
+            let percent = i as f32 / len as f32;
+            let prev_strength = (percent * 0.5 * PI).cos().powi(2);
+            let cur_strength = ((1.0 - percent) * 0.5 * PI).cos().powi(2);
+            output_wav.push(prev_wav[i] * prev_strength + cur_wav[i] * cur_strength);
+        }
+        output_wav
     }
 }
 
@@ -705,16 +727,11 @@ impl MyApp {
     fn calculate_quality(&self) -> f32 {
         let min_buffer = 2048.0;
         let max_buffer = 16384.0;
-        let min_overlap = min_buffer / 4.0;
-        let max_overlap = (max_buffer / 2.0) - 128.0;
 
         let buffer_factor =
             ((self.buffer_size as f32 - min_buffer) / (max_buffer - min_buffer)).clamp(0.0, 1.0);
-        let overlap_factor = ((self.overlap_length as f32 - min_overlap)
-            / (max_overlap - min_overlap))
-            .clamp(0.0, 1.0);
 
-        (buffer_factor + overlap_factor) / 2.0
+        (buffer_factor) / 2.0
     }
 
     fn stop_processing(&mut self) {
@@ -977,7 +994,7 @@ impl eframe::App for MyApp {
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
         // NOTE: a bright gray makes the shadows of the windows look weird.
         // We use a bit of transparency so that if the user switches on the
-        // `transparent()` option they get immediate results.
+        // transparent() option they get immediate results.
         egui::Color32::from_rgba_unmultiplied(12, 12, 12, 180).to_normalized_gamma_f32()
 
         // _visuals.window_fill() would also be a natural choice
