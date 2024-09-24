@@ -727,11 +727,16 @@ impl MyApp {
     fn calculate_quality(&self) -> f32 {
         let min_buffer = 2048.0;
         let max_buffer = 16384.0;
+        let min_overlap = min_buffer / 8.0;
+        let max_overlap = max_buffer / 4.0;
 
         let buffer_factor =
             ((self.buffer_size as f32 - min_buffer) / (max_buffer - min_buffer)).clamp(0.0, 1.0);
+        let overlap_factor = ((self.overlap_length as f32 - min_overlap)
+            / (max_overlap - min_overlap))
+            .clamp(0.0, 1.0);
 
-        (buffer_factor) / 2.0
+        (buffer_factor + overlap_factor) / 2.0
     }
 
     fn stop_processing(&mut self) {
@@ -886,7 +891,7 @@ impl eframe::App for MyApp {
                             ui.add(
                                 Slider::new(
                                     &mut self.overlap_length,
-                                    (self.buffer_size / 4)..=(self.buffer_size / 2 - 128),
+                                    (self.buffer_size / 8)..=(self.buffer_size / 4),
                                 )
                                 .step_by(128.0) // 128刻みで調整可能に
                                 .text("バイト")
