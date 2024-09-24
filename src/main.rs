@@ -73,19 +73,77 @@ struct Delays {
     inference_delay_ms: f32,
     resampling_delay_ms: f32,
 }
+// Implement YIN pitch detection
+fn yin_pitch_detect(signal: &[f32], sample_rate: u32) -> Result<f32> {
+    let tau_max = (sample_rate as f32 / 50.0) as usize; // Minimum f0 = 50 Hz
+    let tau_min = (sample_rate as f32 / 1000.0) as usize; // Maximum f0 = 1000 Hz
 
-// 処理スレッド
-fn processing_thread(
+    let mut yin_buffer = vec![0.0; tau_max];
+    let signal_length = signal.len();
+
+    // Step 1: Difference function
+    for tau in tau_min..tau_max {
+        for i in 0..(signal_length - tau) {
+            let delta = signal[i] - signal[i + tau];
+            yin_buffer[tau] += delta * delta;
+        }
+    }
+
+    // Step 2: Cumulative mean normalized difference function
+    let mut cumulative_mean_normalized = vec![0.0; tau_max];
+    cumulative_mean_normalized[tau_min] = 1.0;
+    let mut running_sum = 0.0;
+    for tau in tau_min..tau_max {
+        running_sum += yin_buffer[tau];
+        cumulative_mean_normalized[tau] = yin_buffer[tau] / (running_sum / (tau as f32));
+    }
+
+    // Step 3: Absolute threshold
+    let threshold = 0.1;
+    let mut tau_estimate = None;
+    for tau in tau_min..tau_max {
+        if cumulative_mean_normalized[tau] < threshold {
+            // Step 4: Parabolic interpolation for better accuracy
+            if tau + 1 < tau_max && tau > tau_min {
+                let better_tau = parabolic_interpolation(
+                    cumulative_mean_normalized[tau - 1],
+                    cumulative_mean_normalized[tau],
+                    cumulative_mean_normalized[tau + 1],
+                );
+                tau_estimate = Some(tau as f32 + better_tau);
+                break;
+            } else {
+                tau_estimate = Some(tau as f32);
+                break;
+            }
+        }
+    }
+
+    if let Some(tau) = tau_estimate {
+        let f0 = sample_rate as f32 / tau;
+        Ok(f0)
+    } else {
+        // Fallback if no pitch detected
+        Ok(0.0)
+    }
+}
+
+fn parabolic_interpolation(y0: f32, y1: f32, y2: f32) -> f32 {
+    let denominator = 2.0 * (y0 - 2.0 * y1 + y2);
+    if denominator.abs() < std::f32::EPSILON {
+        0.0
+    } else {
+        (y0 - y2) / denominator
+    }
+}fn processing_thread(
     hparams: Arc<AudioParams>,
     session: Arc<Session>,
     input_rx: Receiver<Vec<f32>>,
     output_tx: Sender<Vec<f32>>,
     delays: Arc<Mutex<Delays>>, // 追加
 ) -> Result<()> {
-    // Set sola_search_frame equal to overlap_length
-    let sola_search_frame = hparams.overlap_length;
     let overlap_size = hparams.overlap_length;
-    let mut sola = Sola::new(overlap_size, sola_search_frame);
+    let mut psola = PSola::new(overlap_size, hparams.model_sample_rate);
     let mut prev_input_tail: Vec<f32> = Vec::new();
 
     while let Ok(mut input_signal) = input_rx.recv() {
@@ -110,8 +168,8 @@ fn processing_thread(
                 (delays_guard.processing_delay_ms + processing_duration) / 2.0;
         }
 
-        // SOLAによるマージ
-        let merged_signal = sola.merge(&processed_signal);
+        // PSOLAによるマージ
+        let merged_signal = psola.merge(&processed_signal);
 
         // 次回のために入力の終端を保持
         if input_signal.len() >= overlap_size {
@@ -127,6 +185,7 @@ fn processing_thread(
     }
     Ok(())
 }
+
 
 // 音声変換処理のメイン関数
 fn audio_transform(
@@ -1001,4 +1060,88 @@ fn main() -> Result<()> {
         eprintln!("エラーが発生しました: {}", e);
     });
     Ok(())
+}
+// PSOLAアルゴリズムの実装
+struct PSola {
+    overlap_size: usize,
+    prev_wav: Vec<f32>,
+    prev_pitch_period: usize,
+    sample_rate: u32,
+}
+
+impl PSola {
+    fn new(overlap_size: usize, sample_rate: u32) -> Self {
+        Self {
+            overlap_size,
+            prev_wav: Vec::new(),
+            prev_pitch_period: 0,
+            sample_rate,
+        }
+    }
+
+    fn merge(&mut self, wav: &[f32]) -> Vec<f32> {
+        // ピッチ検出
+        let f0 = yin_pitch_detect(wav, self.sample_rate).unwrap_or(0.0);
+        let current_pitch_period = if f0 > 0.0 {
+            (self.sample_rate as f32 / f0) as usize
+        } else {
+            self.prev_pitch_period
+        };
+
+        if self.prev_wav.is_empty() {
+            let output_wav = wav[..wav.len() - self.overlap_size].to_vec();
+            self.prev_wav = wav[wav.len() - self.overlap_size..].to_vec();
+            self.prev_pitch_period = current_pitch_period;
+            return output_wav;
+        }
+
+        // PSOLAのためのオーバーラップ位置の決定
+        let search_range = current_pitch_period;
+        let max_offset = self.prev_wav.len().saturating_sub(search_range);
+        let (best_offset, _) = (0..=max_offset)
+            .map(|offset| {
+                let prev_segment = &self.prev_wav[offset..offset + search_range];
+                let current_segment = &wav[..search_range.min(wav.len())];
+
+                let corr = Self::calculate_correlation(prev_segment, current_segment);
+                (offset, corr)
+            })
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
+            .unwrap_or((0, 0.0));
+
+        // クロスフェードの適用
+        let prev_tail = &self.prev_wav[best_offset..];
+        let current_head = &wav[..prev_tail.len()];
+        let crossfaded = Self::crossfade(prev_tail, current_head);
+
+        // マージ
+        let mut output_wav = self.prev_wav[..best_offset].to_vec();
+        output_wav.extend(crossfaded);
+        output_wav.extend(&wav[prev_tail.len()..wav.len() - self.overlap_size]);
+
+        // 次回のためにデータを保持
+        self.prev_wav = wav[wav.len() - self.overlap_size..].to_vec();
+        self.prev_pitch_period = current_pitch_period;
+
+        output_wav
+    }
+
+    fn calculate_correlation(a: &[f32], b: &[f32]) -> f32 {
+        let dot_product = a.iter().zip(b).map(|(&x, &y)| x * y).sum::<f32>();
+        let norm_a = a.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        let norm_b = b.iter().map(|&x| x * x).sum::<f32>().sqrt();
+        dot_product / (norm_a * norm_b + 1e-8)
+    }
+
+    fn crossfade(prev_wav: &[f32], cur_wav: &[f32]) -> Vec<f32> {
+        let len = prev_wav.len().min(cur_wav.len());
+        (0..len)
+            .map(|i| {
+                let t = i as f32 / (len - 1) as f32;
+                let fade_in = 0.5 - 0.5 * (PI * t).cos();
+                let fade_out = 1.0 - fade_in;
+                prev_wav[i] * fade_out + cur_wav[i] * fade_in
+            })
+            .collect()
+    }
 }
