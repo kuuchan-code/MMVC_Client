@@ -527,7 +527,7 @@ struct MyApp {
     is_running: bool,
     error_message: Option<String>,
 
-    delays: Arc<Mutex<Delays>>, // 追加
+    delays: Arc<Mutex<Delays>>,
 }
 
 use egui::{FontData, FontDefinitions, FontFamily};
@@ -893,22 +893,6 @@ impl eframe::App for MyApp {
                             )
                             .on_hover_text("バッファサイズが小さいと遅延が低く、大きいと音質が向上します。");
                         });
-
-                        // オーバーラップ長の設定（削除）
-                        /*
-                        ui.horizontal(|ui| {
-                            ui.label("オーバーラップ長:");
-                            ui.add(
-                                Slider::new(
-                                    &mut self.overlap_length,
-                                    (self.buffer_size / 8)..=(self.buffer_size / 4) + (self.buffer_size / 16) - 256,
-                                )
-                                .step_by(128.0) // 128刻みで調整可能に
-                                .text("バイト")
-                            )
-                            .on_hover_text("オーバーラップ長が短いと遅延が小さく、大きいと音質が向上します。");
-                        });
-                        */
                     });
 
                     // 音質と遅延のバランスを示すインディケーター
