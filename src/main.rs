@@ -5,7 +5,6 @@ use crossbeam_channel::{bounded, Receiver, Sender};
 use eframe::{self};
 use egui::{self, Color32, ComboBox, ProgressBar, Slider};
 use ndarray::{Array1, Array3, CowArray};
-use once_cell::sync::Lazy;
 use ort::{
     tensor::OrtOwnedTensor, Environment, ExecutionProvider, GraphOptimizationLevel, Session,
     SessionBuilder, Value,
@@ -18,6 +17,7 @@ use std::f32::consts::PI;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
+use std::cell::RefCell;
 
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::{
@@ -27,8 +27,9 @@ use windows::Win32::System::Threading::{
 // 定数の定義
 const FFT_WINDOW_SIZE: usize = 512;
 const HOP_SIZE: usize = 128;
-static FFT_PLANNER: Lazy<Mutex<FftPlanner<f32>>> =
-    Lazy::new(|| Mutex::new(FftPlanner::<f32>::new()));
+thread_local! {
+    static LOCAL_FFT_PLANNER: RefCell<FftPlanner<f32>> = RefCell::new(FftPlanner::new());
+}
 // AudioParams構造体の定義
 struct AudioParams {
     model_sample_rate: u32, // サンプルレートはモデルへの入力用
@@ -209,37 +210,38 @@ fn apply_stft_with_hann_window(audio_signal: &[f32], hparams: &AudioParams) -> A
     let mut spectrogram = Array3::<f32>::zeros((1, fft_size / 2 + 1, num_frames));
 
     // グローバルなFFTプランナーを取得
-    let mut planner = FFT_PLANNER.lock().unwrap();
-    let fft = planner.plan_fft_forward(fft_size);
+    LOCAL_FFT_PLANNER.with(|planner| {
+        let mut planner = planner.borrow_mut();
+        let fft = planner.plan_fft_forward(fft_size);
 
-    let mut input_buffer = vec![Complex::zero(); fft_size];
-    // scratchバッファの追加
-    let mut scratch_buffer = vec![Complex::zero(); fft.get_inplace_scratch_len()];
+        let mut input_buffer = vec![Complex::zero(); fft_size];
+        // scratchバッファの追加
+        let mut scratch_buffer = vec![Complex::zero(); fft.get_inplace_scratch_len()];
 
-    // 周波数解像度の計算
-    let freq_resolution = hparams.model_sample_rate as f32 / fft_size as f32;
-    let cutoff_freq = hparams.cutoff_freq;
-    let cutoff_bin = (cutoff_freq / freq_resolution).ceil() as usize;
+        // 周波数解像度の計算
+        let freq_resolution = hparams.model_sample_rate as f32 / fft_size as f32;
+        let cutoff_freq = hparams.cutoff_freq;
+        let cutoff_bin = (cutoff_freq / freq_resolution).ceil() as usize;
 
-    for (i, frame) in audio_signal.windows(fft_size).step_by(hop_size).enumerate() {
-        // 窓関数の適用と複素数への変換
-        for (j, &sample) in frame.iter().enumerate() {
-            input_buffer[j] = Complex::new(sample * window[j], 0.0);
-        }
+        for (i, frame) in audio_signal.windows(fft_size).step_by(hop_size).enumerate() {
+            // 窓関数の適用と複素数への変換
+            for (j, &sample) in frame.iter().enumerate() {
+                input_buffer[j] = Complex::new(sample * window[j], 0.0);
+            }
 
-        // FFTの実行
-        fft.process_with_scratch(&mut input_buffer, &mut scratch_buffer);
+            // FFTの実行
+            fft.process_with_scratch(&mut input_buffer, &mut scratch_buffer);
 
-        // スペクトログラムの取得とフィルタリング
-        for (j, bin) in input_buffer.iter().take(fft_size / 2 + 1).enumerate() {
-            if hparams.cutoff_enabled && j < cutoff_bin {
-                spectrogram[[0, j, i]] = 0.0; // カットオフが有効であり、カットオフ周波数以下の場合
-            } else {
-                spectrogram[[0, j, i]] = bin.norm();
+            // スペクトログラムの取得とフィルタリング
+            for (j, bin) in input_buffer.iter().take(fft_size / 2 + 1).enumerate() {
+                if hparams.cutoff_enabled && j < cutoff_bin {
+                    spectrogram[[0, j, i]] = 0.0; // カットオフが有効であり、カットオフ周波数以下の場合
+                } else {
+                    spectrogram[[0, j, i]] = bin.norm();
+                }
             }
         }
-    }
-
+    });
     spectrogram
 }
 
