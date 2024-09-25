@@ -12,16 +12,16 @@ use ort::{
 use rustfft::num_traits::Zero;
 use rustfft::{num_complex::Complex, FftPlanner};
 use speexdsp_resampler::State as SpeexResampler;
+use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::f32::consts::PI;
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::thread::JoinHandle;
-use std::cell::RefCell;
 
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::{
-    GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_TIME_CRITICAL,
+    GetCurrentProcess, SetPriorityClass, REALTIME_PRIORITY_CLASS,
 };
 
 // 定数の定義
@@ -596,7 +596,7 @@ impl MyApp {
             cutoff_freq: 150.0,
             model_sample_rate: 24000,
             buffer_size: 8192,
-            overlap_length: 1024,
+            overlap_length: 2048,
 
             input_device_names,
             output_device_names,
@@ -696,22 +696,6 @@ impl MyApp {
         let session_clone = Arc::clone(&session);
         let delays_clone = Arc::clone(&self.delays); // 追加
         let processing_handle = thread::spawn(move || {
-            #[cfg(target_os = "windows")]
-            {
-                // 処理スレッド内で優先度を設定
-                let current_thread = unsafe { GetCurrentThread() };
-                let success =
-                    unsafe { SetThreadPriority(current_thread, THREAD_PRIORITY_TIME_CRITICAL) };
-                match success {
-                    Ok(_) => {
-                        println!(
-                            "処理スレッドの優先度を THREAD_PRIORITY_TIME_CRITICAL に設定しました。"
-                        )
-                    }
-                    Err(e) => eprintln!("処理スレッドの優先度設定に失敗しました。エラー: {:?}", e),
-                }
-            }
-
             if let Err(e) = processing_thread(
                 hparams_clone,
                 session_clone,
@@ -1034,6 +1018,18 @@ impl eframe::App for MyApp {
 }
 
 fn main() -> Result<()> {
+    #[cfg(target_os = "windows")]
+    {
+        // 現在のプロセスを取得
+        let current_process = unsafe { GetCurrentProcess() };
+
+        // プロセスの優先度をリアルタイムに設定
+        if unsafe { SetPriorityClass(current_process, REALTIME_PRIORITY_CLASS) }.is_err() {
+            eprintln!("プロセスの優先度設定に失敗しました。");
+        } else {
+            println!("プロセスの優先度をリアルタイムに設定しました。");
+        }
+    }
     let options = eframe::NativeOptions::default();
     eframe::run_native(
         "MMVC Client",
