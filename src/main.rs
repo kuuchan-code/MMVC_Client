@@ -644,7 +644,7 @@ impl MyApp {
         println!("ONNX Runtimeの環境を構築中...");
         let environment = Environment::builder()
             .with_name("MMVC_Client")
-            .with_execution_providers([ExecutionProvider::TensorRT(Default::default())])
+            .with_execution_providers([ExecutionProvider::CUDA(Default::default())])
             .build()
             .context("ONNX Runtimeの環境構築に失敗しました")?
             .into_arc();
@@ -1011,6 +1011,7 @@ impl eframe::App for MyApp {
 }
 
 fn main() -> Result<()> {
+    tracing_subscriber::fmt::init();
     #[cfg(target_os = "windows")]
     {
         // 現在のプロセスを取得
