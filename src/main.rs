@@ -42,17 +42,19 @@ struct AudioParams {
     cutoff_freq: f32,
 }
 
-// AudioParamsの実装
+// AudioParamsの実装（new関数の変更）
 impl AudioParams {
     fn new(
         model_sample_rate: u32,
         buffer_size: usize,
-        overlap_length: usize,
         source_speaker_id: i64,
         target_speaker_id: i64,
         cutoff_enabled: bool,
         cutoff_freq: f32,
     ) -> Self {
+        // overlap_lengthをbuffer_sizeに基づいて計算
+        let overlap_length = (buffer_size / 4) + (buffer_size / 16) - 256;
+
         let hann_window: Vec<f32> = (0..FFT_WINDOW_SIZE)
             .map(|n| 0.5 * (1.0 - (2.0 * PI * n as f32 / FFT_WINDOW_SIZE as f32).cos()))
             .collect();
@@ -514,7 +516,6 @@ struct MyApp {
     cutoff_freq: f32,
     model_sample_rate: u32,
     buffer_size: usize,
-    overlap_length: usize,
 
     input_device_names: Vec<String>,
     output_device_names: Vec<String>,
@@ -596,7 +597,6 @@ impl MyApp {
             cutoff_freq: 150.0,
             model_sample_rate: 24000,
             buffer_size: 8192,
-            overlap_length: 2048,
 
             input_device_names,
             output_device_names,
@@ -618,7 +618,10 @@ impl MyApp {
 
     fn calculate_latency_ms(&self) -> f32 {
         let buffer_delay = self.buffer_size as f32 / self.model_sample_rate as f32 * 1000.0;
-        let overlap_delay = self.overlap_length as f32 / self.model_sample_rate as f32 * 1000.0;
+
+        // overlap_length を計算
+        let overlap_length = (self.buffer_size / 4) + (self.buffer_size / 16) - 256;
+        let overlap_delay = overlap_length as f32 / self.model_sample_rate as f32 * 1000.0;
 
         let delays_guard = self.delays.lock().unwrap();
         let resampling_delay = delays_guard.resampling_delay_ms;
@@ -673,7 +676,6 @@ impl MyApp {
         let hparams = Arc::new(AudioParams::new(
             self.model_sample_rate,
             self.buffer_size,
-            self.overlap_length,
             self.source_speaker_id,
             self.target_speaker_id,
             self.cutoff_enabled,
@@ -737,9 +739,11 @@ impl MyApp {
 
         let buffer_factor =
             ((self.buffer_size as f32 - min_buffer) / (max_buffer - min_buffer)).clamp(0.0, 1.0);
-        let overlap_factor = ((self.overlap_length as f32 - min_overlap)
-            / (max_overlap - min_overlap))
-            .clamp(0.0, 1.0);
+
+        // overlap_length を計算
+        let overlap_length = (self.buffer_size / 4) + (self.buffer_size / 16) - 256;
+        let overlap_factor =
+            ((overlap_length as f32 - min_overlap) / (max_overlap - min_overlap)).clamp(0.0, 1.0);
 
         (buffer_factor + overlap_factor) / 2.0
     }
@@ -890,7 +894,8 @@ impl eframe::App for MyApp {
                             .on_hover_text("バッファサイズが小さいと遅延が低く、大きいと音質が向上します。");
                         });
 
-                        // オーバーラップ長の設定
+                        // オーバーラップ長の設定（削除）
+                        /*
                         ui.horizontal(|ui| {
                             ui.label("オーバーラップ長:");
                             ui.add(
@@ -903,6 +908,7 @@ impl eframe::App for MyApp {
                             )
                             .on_hover_text("オーバーラップ長が短いと遅延が小さく、大きいと音質が向上します。");
                         });
+                        */
                     });
 
                     // 音質と遅延のバランスを示すインディケーター
@@ -914,7 +920,10 @@ impl eframe::App for MyApp {
 
                     // バッファ遅延とオーバーラップ遅延の計算
                     let buffer_delay = self.buffer_size as f32 / self.model_sample_rate as f32 * 1000.0;
-                    let overlap_delay = self.overlap_length as f32 / self.model_sample_rate as f32 * 1000.0;
+
+                    // overlap_length を計算
+                    let overlap_length = (self.buffer_size / 4) + (self.buffer_size / 16) - 256;
+                    let overlap_delay = overlap_length as f32 / self.model_sample_rate as f32 * 1000.0;
 
                     // 縦に並べる
                     ui.vertical(|ui| {
