@@ -166,12 +166,10 @@ fn audio_transform(
             (delays_guard.inference_delay_ms + inference_duration) / 2.0;
     }
 
-    let audio = match audio_result {
+    match audio_result {
         Some(a) => a,
-        None => return vec![0.0; signal.len()],
-    };
-
-    audio
+        None => vec![0.0; signal.len()],
+    }
 }
 
 // ONNXモデルでの推論を実行
@@ -456,8 +454,8 @@ impl Sola {
         let mut result = Vec::with_capacity(size);
         let mut sum = 0.0;
 
-        for i in 0..len {
-            let val = a[i];
+        for item in a.iter().take(len) {
+            let val = item;
             sum += val * val;
         }
         result.push(sum);
@@ -974,11 +972,9 @@ impl eframe::App for MyApp {
                                     }
                                 }
                             }
-                        } else {
-                            if ui.button("停止").clicked() {
-                                // 処理を停止
-                                self.stop_processing();
-                            }
+                        } else if ui.button("停止").clicked() {
+                            // 処理を停止
+                            self.stop_processing();
                         }
                     },
                 );
