@@ -71,7 +71,15 @@ impl AudioParams {
 
     fn calculate_overlap_length(buffer_size: usize) -> usize {
         // overlap_lengthをbuffer_sizeに基づいて計算
-        (buffer_size / 4) + (buffer_size / 16) - 256
+        let raw_overlap = (buffer_size / 4) + (buffer_size / 16) - 256;
+
+        // 128の倍数に丸める（四捨五入）
+        let remainder = raw_overlap % 128;
+        if remainder >= 64 {
+            raw_overlap + (128 - remainder)
+        } else {
+            raw_overlap - remainder
+        }
     }
 
     fn generate_hann_window(size: usize) -> Vec<f32> {
