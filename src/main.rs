@@ -3,7 +3,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, StreamConfig};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use eframe::{self};
-use egui::{self, ComboBox, Slider};
+use egui::{self, ComboBox, ProgressBar, Slider};
 use ndarray::{Array1, Array3, CowArray};
 use ort::{
     tensor::OrtOwnedTensor, Environment, ExecutionProvider, GraphOptimizationLevel, Session,
@@ -610,10 +610,8 @@ impl MyApp {
     }
 
     fn calculate_latency_ms(&self) -> f32 {
-        let buffer_delay = self.buffer_size as f32 / self.model_sample_rate as f32 * 1000.0;
-
         // オーバーラップ遅延を遅延計算から除外
-        buffer_delay
+        self.buffer_size as f32 / self.model_sample_rate as f32 * 1000.0
     }
 
     fn start_processing(&mut self) -> Result<()> {
@@ -719,8 +717,6 @@ impl MyApp {
 
         self.is_running = false;
     }
-
-    // GUIの実装は省略しますが、必要に応じて改善や整理を行ってください。
 }
 
 impl eframe::App for MyApp {
@@ -838,6 +834,7 @@ impl eframe::App for MyApp {
                             ui.label("カットオフ周波数:");
                             ui.add(egui::Slider::new(&mut self.cutoff_freq, 1.0..=300.0).text("Hz"));
                         });
+                        ui.label("※ 声の基本周波数（約80Hz〜300Hz）より低い値に設定することで、ノイズや不要な低音を除去できます。");
                     }
                 });
 
@@ -852,7 +849,6 @@ impl eframe::App for MyApp {
                                     .step_by(512.0) // 512刻みで調整可能に
                                     .text("サンプル数")
                             )
-                            .on_hover_text("バッファサイズが小さいと遅延が低く、大きいと音質が向上します。");
                         });
                     });
 
@@ -867,14 +863,25 @@ impl eframe::App for MyApp {
 
                     // 縦に並べる
                     ui.vertical(|ui| {
-                        // 遅延の表示
+                        // 遅延に応じたプログレスバーの色を決定
+                        let progress_color = if latency_ms <= 150.0 {
+                            egui::Color32::GREEN
+                        } else if latency_ms <= 300.0 {
+                            egui::Color32::YELLOW
+                        } else {
+                            egui::Color32::RED
+                        };
+
+                        // プログレスバーを表示
                         ui.horizontal(|ui| {
                             ui.label("遅延:");
-                            ui.label(format!("{:.2} ms", latency_ms));
+                            let progress = latency_ms.min(500.0) / 500.0; // 最大500msで正規化
+                            ui.add(ProgressBar::new(progress)
+                                .fill(progress_color)
+                                .text(format!("{:.2} ms", latency_ms))); // プログレスバーの上に遅延のmsを表示
                         });
-
-                        ui.label("※ 遅延は推定値です。実際にはオーディオAPI（WASAPI共有モード）に由来する遅延も加算されます。");
-
+                        ui.label("※遅延は推定値です。");
+                        ui.label("バッファサイズが小さすぎると音質が低下する可能性がありますので、適切なサイズを選んでください。");    
                         // 遅延詳細の表示を折りたたみ可能にする部分
                         ui.collapsing("詳細を見る", |ui| {
                             let delays_guard = self.delays.lock().unwrap();
@@ -883,8 +890,8 @@ impl eframe::App for MyApp {
                             ui.label(format!("リサンプリング時間: {:.2} ms", delays_guard.resampling_time_ms));
                             ui.label(format!("推論時間: {:.2} ms", delays_guard.inference_time_ms));
                         });
-                    });
-                });
+                      });
+                            });
 
                 ui.separator();
 
