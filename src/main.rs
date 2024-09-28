@@ -621,12 +621,8 @@ impl MyApp {
     fn calculate_latency_ms(&self) -> f32 {
         let buffer_delay = self.buffer_size as f32 / self.model_sample_rate as f32 * 1000.0;
 
-        // overlap_length を計算
-        let overlap_length = (self.buffer_size / 4) + (self.buffer_size / 16) - 256;
-        let overlap_delay = overlap_length as f32 / self.model_sample_rate as f32 * 1000.0;
-
-        // 推論遅延を除外し、固定的な遅延のみを計算
-        buffer_delay + overlap_delay
+        // オーバーラップ遅延を遅延計算から除外
+        buffer_delay
     }
 
     fn start_processing(&mut self) -> Result<()> {
@@ -906,15 +902,14 @@ impl eframe::App for MyApp {
 
                         ui.label("※ 音質や遅延は推定値です。実際の環境により異なる場合があります。");
 
-                        // 遅延詳細の表示を折りたたみ可能にする
+                        // 遅延詳細の表示を折りたたみ可能にする部分
                         ui.collapsing("遅延の詳細を見る", |ui| {
                             let delays_guard = self.delays.lock().unwrap();
                             ui.separator();
                             ui.label(format!("バッファ遅延: {:.2} ms", buffer_delay));
-                            ui.label(format!("オーバーラップ遅延: {:.2} ms", overlap_delay));
                             ui.label(format!("リサンプリング時間: {:.2} ms", delays_guard.resampling_time_ms));
                             ui.label(format!("推論時間: {:.2} ms", delays_guard.inference_time_ms));
-                        })
+                        });
                     });
                 });
 
