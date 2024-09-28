@@ -12,6 +12,7 @@ use ort::{
 use rustfft::num_traits::Zero;
 use rustfft::{num_complex::Complex, FftPlanner};
 use speexdsp_resampler::State as SpeexResampler;
+use tracing_subscriber::EnvFilter;
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::f32::consts::PI;
@@ -261,7 +262,7 @@ fn record_and_resample(
         1,
         input_sample_rate as usize,
         hparams.model_sample_rate as usize,
-        5,
+        8,
     )
     .map_err(|e| anyhow::anyhow!("リサンプリザーの初期化に失敗しました: {:?}", e))?;
 
@@ -344,7 +345,7 @@ fn play_output(
         1,
         model_sample_rate as usize,
         output_sample_rate as usize,
-        5,
+        8,
     )
     .map_err(|e| anyhow::anyhow!("リサンプリザーの初期化に失敗しました: {:?}", e))?;
     let mut output_buffer: VecDeque<f32> = VecDeque::with_capacity(max_buffer_size);
@@ -1011,7 +1012,11 @@ impl eframe::App for MyApp {
 }
 
 fn main() -> Result<()> {
-    tracing_subscriber::fmt::init();
+    // 環境変数からフィルタを取得し、設定されていない場合はデフォルトで "ort=info" を使用
+    let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("ort=info"));
+
+    // フィルタを適用してトレースサブスクライバーを初期化
+    tracing_subscriber::fmt().with_env_filter(filter).init();
     #[cfg(target_os = "windows")]
     {
         // 現在のプロセスを取得
