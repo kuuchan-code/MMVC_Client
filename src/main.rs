@@ -526,6 +526,7 @@ struct MyApp {
     error_message: Option<String>,
 
     delays: Arc<Mutex<Delays>>,
+    environment: Option<Arc<Environment>>,
 }
 
 use egui::{FontData, FontDefinitions, FontFamily};
@@ -611,6 +612,7 @@ impl MyApp {
                 inference_delay_ms: 0.0,
                 resampling_delay_ms: 0.0,
             })),
+            environment: None,
         }
     }
 
@@ -646,6 +648,7 @@ impl MyApp {
             .build()
             .context("ONNX Runtimeの環境構築に失敗しました")?
             .into_arc();
+        self.environment = Some(environment.clone());
 
         println!("ONNX Runtimeセッションを構築中...");
         let session = Arc::new(
@@ -756,6 +759,7 @@ impl MyApp {
             // 処理スレッドが終了するまで待機
             handle.join().expect("処理スレッドの終了に失敗しました");
         }
+        self.environment.take();
 
         self.is_running = false;
     }
@@ -887,7 +891,7 @@ impl eframe::App for MyApp {
                             ui.add(
                                 Slider::new(&mut self.buffer_size, 4096..=16384)
                                     .step_by(512.0) // 512刻みで調整可能に
-                                    .text("バイト")
+                                    .text("サンプル数")
                             )
                             .on_hover_text("バッファサイズが小さいと遅延が低く、大きいと音質が向上します。");
                         });
