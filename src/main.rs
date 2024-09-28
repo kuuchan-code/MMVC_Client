@@ -83,9 +83,9 @@ impl AudioParams {
 
 // 遅延計算用の構造体
 struct Delays {
-    processing_delay_ms: f32,
-    inference_delay_ms: f32,
-    resampling_delay_ms: f32,
+    processing_time_ms: f32,
+    inference_time_ms: f32,
+    resampling_time_ms: f32,
 }
 
 // 処理スレッド
@@ -118,8 +118,8 @@ fn processing_thread(
 
         {
             let mut delays_guard = delays.lock().unwrap();
-            delays_guard.processing_delay_ms =
-                (delays_guard.processing_delay_ms + processing_duration) / 2.0;
+            delays_guard.processing_time_ms =
+                (delays_guard.processing_time_ms + processing_duration) / 2.0;
         }
 
         let merged_signal = sola.merge(&processed_signal);
@@ -166,8 +166,8 @@ fn audio_transform(
 
     {
         let mut delays_guard = delays.lock().unwrap();
-        delays_guard.inference_delay_ms =
-            (delays_guard.inference_delay_ms + inference_duration) / 2.0;
+        delays_guard.inference_time_ms =
+            (delays_guard.inference_time_ms + inference_duration) / 2.0;
     }
 
     Ok(audio_result)
@@ -254,7 +254,7 @@ fn record_and_resample(
         1,
         input_sample_rate as usize,
         hparams.model_sample_rate as usize,
-        8,
+        10,
     )
     .map_err(|e| anyhow::anyhow!("リサンプリザーの初期化に失敗しました: {:?}", e))?;
 
@@ -302,8 +302,8 @@ fn record_and_resample(
 
                     {
                         let mut delays_guard = delays.lock().unwrap();
-                        delays_guard.resampling_delay_ms =
-                            (delays_guard.resampling_delay_ms + resampling_duration) / 2.0;
+                        delays_guard.resampling_time_ms =
+                            (delays_guard.resampling_time_ms + resampling_duration) / 2.0;
                     }
                 }
             },
@@ -333,7 +333,7 @@ fn play_output(
         1,
         model_sample_rate as usize,
         output_sample_rate as usize,
-        8,
+        10,
     )
     .map_err(|e| anyhow::anyhow!("リサンプリザーの初期化に失敗しました: {:?}", e))?;
     let mut output_buffer: VecDeque<f32> = VecDeque::with_capacity(max_buffer_size);
@@ -593,9 +593,9 @@ impl MyApp {
             error_message: None,
 
             delays: Arc::new(Mutex::new(Delays {
-                processing_delay_ms: 0.0,
-                inference_delay_ms: 0.0,
-                resampling_delay_ms: 0.0,
+                processing_time_ms: 0.0,
+                inference_time_ms: 0.0,
+                resampling_time_ms: 0.0,
             })),
             environment: None,
         }
@@ -621,14 +621,12 @@ impl MyApp {
     fn calculate_latency_ms(&self) -> f32 {
         let buffer_delay = self.buffer_size as f32 / self.model_sample_rate as f32 * 1000.0;
 
-        let overlap_length = AudioParams::calculate_overlap_length(self.buffer_size);
+        // overlap_length を計算
+        let overlap_length = (self.buffer_size / 4) + (self.buffer_size / 16) - 256;
         let overlap_delay = overlap_length as f32 / self.model_sample_rate as f32 * 1000.0;
 
-        let delays_guard = self.delays.lock().unwrap();
-        let resampling_delay = delays_guard.resampling_delay_ms;
-        let processing_delay = delays_guard.processing_delay_ms;
-
-        buffer_delay + overlap_delay + resampling_delay + processing_delay
+        // 推論遅延を除外し、固定的な遅延のみを計算
+        buffer_delay + overlap_delay
     }
 
     fn start_processing(&mut self) -> Result<()> {
@@ -914,8 +912,8 @@ impl eframe::App for MyApp {
                             ui.separator();
                             ui.label(format!("バッファ遅延: {:.2} ms", buffer_delay));
                             ui.label(format!("オーバーラップ遅延: {:.2} ms", overlap_delay));
-                            ui.label(format!("リサンプリング遅延: {:.2} ms", delays_guard.resampling_delay_ms));
-                            ui.label(format!("推論遅延: {:.2} ms", delays_guard.inference_delay_ms));
+                            ui.label(format!("リサンプリング時間: {:.2} ms", delays_guard.resampling_time_ms));
+                            ui.label(format!("推論時間: {:.2} ms", delays_guard.inference_time_ms));
                         })
                     });
                 });
