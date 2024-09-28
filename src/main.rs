@@ -875,10 +875,6 @@ impl eframe::App for MyApp {
                     // バッファ遅延とオーバーラップ遅延の計算
                     let buffer_delay = self.buffer_size as f32 / self.model_sample_rate as f32 * 1000.0;
 
-                    // overlap_length を計算
-                    let overlap_length = (self.buffer_size / 4) + (self.buffer_size / 16) - 256;
-                    let overlap_delay = overlap_length as f32 / self.model_sample_rate as f32 * 1000.0;
-
                     // 縦に並べる
                     ui.vertical(|ui| {
                         ui.label("音質と遅延のバランス:");
