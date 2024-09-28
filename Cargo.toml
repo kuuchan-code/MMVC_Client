@@ -1,6 +1,6 @@
 [package]
 name = "mmvc_client"
-version = "0.4.1"
+version = "0.4.2"
 authors = ["ku-chan"]
 description = "MMVC ClientのRust版"
 edition = "2021"
