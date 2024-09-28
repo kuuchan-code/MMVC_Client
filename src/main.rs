@@ -3,7 +3,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{Device, StreamConfig};
 use crossbeam_channel::{bounded, Receiver, Sender};
 use eframe::{self};
-use egui::{self, Color32, ComboBox, ProgressBar, Slider};
+use egui::{self, ComboBox, Slider};
 use ndarray::{Array1, Array3, CowArray};
 use ort::{
     tensor::OrtOwnedTensor, Environment, ExecutionProvider, GraphOptimizationLevel, Session,
@@ -609,23 +609,6 @@ impl MyApp {
         }
     }
 
-    fn calculate_quality(&self) -> f32 {
-        let min_buffer = 2048.0;
-        let max_buffer = 16384.0;
-        let min_overlap = min_buffer / 8.0;
-        let max_overlap = (max_buffer / 4.0) + (max_buffer / 16.0) - 256.0;
-
-        let buffer_factor =
-            ((self.buffer_size as f32 - min_buffer) / (max_buffer - min_buffer)).clamp(0.0, 1.0);
-
-        // overlap_length を計算
-        let overlap_length = (self.buffer_size / 4) + (self.buffer_size / 16) - 256;
-        let overlap_factor =
-            ((overlap_length as f32 - min_overlap) / (max_overlap - min_overlap)).clamp(0.0, 1.0);
-
-        (buffer_factor + overlap_factor) / 2.0
-    }
-
     fn calculate_latency_ms(&self) -> f32 {
         let buffer_delay = self.buffer_size as f32 / self.model_sample_rate as f32 * 1000.0;
 
@@ -877,7 +860,6 @@ impl eframe::App for MyApp {
                     ui.separator();
 
                     // 音質と遅延の計算
-                    let quality = self.calculate_quality();
                     let latency_ms = self.calculate_latency_ms();
 
                     // バッファ遅延とオーバーラップ遅延の計算
@@ -885,29 +867,16 @@ impl eframe::App for MyApp {
 
                     // 縦に並べる
                     ui.vertical(|ui| {
-                        ui.label("音質と遅延のバランス:");
-
-                        // 音質のプログレスバー
-                        ui.horizontal(|ui| {
-                            ui.label("音質:");
-                            ui.add(
-                                ProgressBar::new(quality)
-                                    .fill(Color32::from_rgb(0, 200, 0)) // 緑色
-                                    .show_percentage()
-                            )
-                            .on_hover_text("音質の指標です。バッファサイズとオーバーラップ長が大きいほど高くなります。");
-                        });
-
                         // 遅延の表示
                         ui.horizontal(|ui| {
                             ui.label("遅延:");
                             ui.label(format!("{:.2} ms", latency_ms));
                         });
 
-                        ui.label("※ 音質や遅延は推定値です。実際の環境により異なる場合があります。");
+                        ui.label("※ 遅延は推定値です。実際にはオーディオAPI（WASAPI共有モード）に由来する遅延も加算されます。");
 
                         // 遅延詳細の表示を折りたたみ可能にする部分
-                        ui.collapsing("遅延の詳細を見る", |ui| {
+                        ui.collapsing("詳細を見る", |ui| {
                             let delays_guard = self.delays.lock().unwrap();
                             ui.separator();
                             ui.label(format!("バッファ遅延: {:.2} ms", buffer_delay));
