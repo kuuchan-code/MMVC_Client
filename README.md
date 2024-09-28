@@ -46,6 +46,10 @@
 * [isletennos/MMVC_Client](https://github.com/isletennos/MMVC_Client) - MIT License
 * [ONNX Runtime](https://github.com/microsoft/onnxruntime) - MIT License
 
+### フォントライセンス
+
+本プロジェクトには、NotoSansJP-Regular.ttf フォントが含まれています。このフォントは、SIL Open Font License (OFL) バージョン1.1に基づいて使用されています。詳細なライセンス情報については、`OFL.txt` ファイルを参照してください。
+
 ## 作者
 
 * **ku-chan** - [kuuchan-code](https://github.com/kuuchan-code)
