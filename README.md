@@ -59,6 +59,8 @@ cargo build --release
 4. 「開始」ボタンをクリックして音声変換を開始
 5. 「停止」ボタンで処理を終了
 
+![MMVC Client Screenshot](https://github.com/user-attachments/assets/9696dd0d-0fcd-4315-80dc-2b52b5c668ee)
+
 ### パラメータの調整ガイド
 
 * **バッファサイズ**: 
